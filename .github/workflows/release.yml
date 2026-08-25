@@ -20,6 +20,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Fail before anything is published if the tag and the manifest disagree.
+      # Tagging v0.2.0 against version 0.1.0 would otherwise quietly republish
+      # 0.1.0, and npm unpublishing is a 72-hour window at best.
+      - name: Check the tag matches package.json
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG}"
+            exit 1
+          fi
+          echo "Publishing version ${PKG}"
+
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
