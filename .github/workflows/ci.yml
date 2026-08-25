@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The suite runs TypeScript directly, which needs Node's type
+        # stripping (unflagged from 22.18 and 23.6).
+        node: ['22.18', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # The package ships compiled JavaScript, so it must work on the oldest
+  # runtime `engines` claims — not just on the version the tests run under.
+  verify-published-artifact:
+    name: built package on node 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: import dist and block a known-bad URL
+        run: |
+          node --input-type=module -e "
+            import { createSafeFetch, SsrfBlockedError } from './dist/index.js'
+            import assert from 'node:assert/strict'
+            const safeFetch = createSafeFetch()
+            await assert.rejects(
+              () => safeFetch('http://169.254.169.254/latest/meta-data/'),
+              SsrfBlockedError,
+            )
+            await assert.rejects(() => safeFetch('http://0x7f000001/'), SsrfBlockedError)
+            console.log('dist works on node ' + process.version)
+          "

@@ -1,0 +1,33 @@
+# Publishes to npm with provenance, on a pushed tag.
+#
+# Provenance requires `id-token: write` and npm >= 9.5. It links the published
+# tarball back to this workflow run and this commit, so an installer can verify
+# where the code came from — which matters rather a lot for a security library.
+#
+# Requires an NPM_TOKEN secret with publish rights (automation token).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

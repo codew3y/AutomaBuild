@@ -2,7 +2,9 @@
 
 An HTTP client for applications that fetch URLs supplied by their users — without letting those users reach the inside of your network.
 
-> **Status:** in development. Part of the [AutomaBuild](https://github.com/codew3y/AutomaBuild) workflow-automation platform (component A of four).
+> **Status:** v0.1.0, not yet published to npm. Part of the [AutomaBuild](https://github.com/codew3y/AutomaBuild) workflow-automation platform (component A of four).
+>
+> Zero runtime dependencies. Node >= 20.6.
 
 ---
 
@@ -44,40 +46,109 @@ Node's built-in `fetch` does not protect against any of this. The [upstream issu
 
 ### Blocked by default
 
+Ranges follow [RFC 6890](https://www.rfc-editor.org/rfc/rfc6890), the special-purpose address registry.
+
 | | Ranges |
 |---|---|
-| IPv4 | `0.0.0.0/8` `10.0.0.0/8` `100.64.0.0/10` `127.0.0.0/8` `169.254.0.0/16` `172.16.0.0/12` `192.0.0.0/24` `192.168.0.0/16` `224.0.0.0/4` `240.0.0.0/4` |
-| IPv6 | `::/128` `::1/128` `::ffff:0:0/96` `fc00::/7` `fe80::/10` `ff00::/8` |
-| Cloud metadata | `169.254.169.254` (AWS/GCP/Azure), `fd00:ec2::254`, `metadata.google.internal` |
-| Hostnames | `localhost`, `*.internal`, `*.local` |
+| IPv4 | `0.0.0.0/8` `10.0.0.0/8` `100.64.0.0/10` `127.0.0.0/8` `169.254.0.0/16` `172.16.0.0/12` `192.0.0.0/24` `192.0.2.0/24` `192.168.0.0/16` `198.18.0.0/15` `198.51.100.0/24` `203.0.113.0/24` `224.0.0.0/4` `240.0.0.0/4` |
+| IPv6 | `::/128` `::1/128` `::ffff:0:0/96` `64:ff9b::/96` `100::/64` `2001:db8::/32` `fc00::/7` `fe80::/10` `ff00::/8` |
+| Cloud metadata | `169.254.169.254` (AWS/GCP/Azure), `fd00:ec2::254` (AWS over IPv6) |
+| Hostnames | `localhost`, `*.local`, `*.internal`, `*.home.arpa`, `metadata.google.internal`, `metadata.goog`, `metadata.amazonaws.com`, `instance-data` |
+
+Ports are also allow-listed: `80`, `443`, `8080`, `8443` by default.
+
+Every one of these is overridable — `allowedRanges` punches a hole through the deny-list for a range you genuinely mean to reach, and is checked first.
 
 ## Usage
 
 ```ts
-// API sketch — subject to change until v0.1.0
-import { createSafeFetch } from 'automa-safe-fetch'
+import { createSafeFetch, SsrfBlockedError, getConnectionInfo } from 'automa-safe-fetch'
 
 const safeFetch = createSafeFetch({
-  maxRedirects: 0,
-  maxResponseBytes: 10 * 1024 * 1024,
-  timeoutMs: 30_000,
+  maxRedirects: 0,                     // default: do not follow redirects at all
+  maxResponseBytes: 10 * 1024 * 1024,  // streaming cap, aborts mid-body
+  timeoutMs: 30_000,                   // whole operation, redirects included
 })
 
-const res = await safeFetch('https://api.example.com/data')
-// throws SsrfBlockedError if the URL resolves anywhere private
+try {
+  const res = await safeFetch('https://api.example.com/data')
+  console.log(res.status, await res.text())
+
+  // Log this. Detection needs the address you actually connected to.
+  console.log(getConnectionInfo(res)?.resolvedIp)
+} catch (err) {
+  if (err instanceof SsrfBlockedError) {
+    console.warn(`blocked: ${err.reason}`, {
+      hostname: err.hostname,
+      resolvedIp: err.resolvedIp,   // present whenever DNS got far enough
+      matchedRange: err.matchedRange,
+      hop: err.hop,                 // which redirect refused; 0 is the caller's URL
+    })
+  }
+}
 ```
+
+The returned value is a standard `Response`, so `.text()`, `.json()`, `.arrayBuffer()` and `.body` all work as usual.
+
+### Options
+
+| Option | Default | |
+|---|---|---|
+| `maxRedirects` | `0` | A redirect is a URL the *server* chose. Each hop is revalidated from scratch. |
+| `maxResponseBytes` | `10 MiB` | Enforced as bytes arrive, and pre-emptively from `Content-Length`. |
+| `timeoutMs` | `30_000` | Covers the whole operation, not just the connect. |
+| `allowedPorts` | `80, 443, 8080, 8443` | |
+| `allowedRanges` | none | CIDRs permitted even if a blocked range matches. Checked first. |
+| `extraBlockedRanges` | none | Added to the defaults — your own internal ranges belong here. |
+| `blockedRanges` | the table above | Replaces the defaults entirely. |
+| `extraBlockedHostnames` | none | Your internal domains belong here. |
+| `dnsServers` | system | |
+| `resolver` | built-in | Injectable, so a test can drive DNS. |
+| `onConnect` | none | Called with `ConnectionInfo` for every connection. |
+
+All of `maxRedirects`, `maxResponseBytes` and `timeoutMs` can also be overridden per request.
+
+### Errors
+
+| Class | |
+|---|---|
+| `SsrfBlockedError` | The request resolved somewhere it must not reach. Carries `reason`, `hostname`, `resolvedIp`, `matchedRange`, `hop`. |
+| `ResponseTooLargeError` | Body exceeded the cap; the connection was torn down. |
+| `TooManyRedirectsError` | Chain longer than `maxRedirects` (including a redirect when they are disabled). |
+| `SafeFetchTimeoutError` | Deadline expired. |
+
+`reason` is one of `scheme-not-allowed`, `userinfo-in-url`, `port-not-allowed`, `malformed-url`, `ip-literal-encoded`, `blocked-hostname`, `dns-resolution-failed`, `no-addresses`, `blocked-range`, `ipv4-mapped-ipv6`, `metadata-endpoint`, `unpinned-resolution`. These are stable — switch on them, alert on them.
+
+Address checks run *before* the port check, deliberately. Both would refuse the request, but `metadata-endpoint` is the reason worth paging someone over, and a port rule running first would hide it behind `port-not-allowed`.
 
 ## What this is not
 
 **This is a defence-in-depth layer, not a security boundary.** OWASP is explicit that address deny-lists are bypass-prone. The durable control for untrusted-URL fetching is network topology: run the fetcher in a subnet with no route to anything internal, force egress through a proxy, and require IMDSv2 with a hop limit of 1. Use this library *and* do that. If you can only do one, do the network isolation.
 
+Specific things it deliberately does not do:
+
+- **No egress proxy or network isolation.** That is infrastructure, and it is the layer that actually holds.
+- **No decompression-bomb defence.** The size cap counts bytes on the wire, and the client asks for `identity` encoding so that number is meaningful. If you override `accept-encoding`, the cap no longer bounds what you decompress.
+- **No retries, backoff, or circuit breaking.**
+- **No authentication or credential handling**, beyond dropping `Authorization` and `Cookie` when a server redirects you to another origin.
+- **`allowedRanges` is a loaded gun.** It is checked before everything else. Whatever you put there is reachable.
+
+One residual gap worth naming: validation happens per request, so a name that passes now could rebind before a *later* request. That is handled by revalidating every time — there is no caching of a verdict — but it does mean a long-lived response stream is only ever as trustworthy as the address it was pinned to at the start.
+
 ## Testing
 
-The test suite is the point of this project. It runs a controlled DNS server that answers with a public address on the first query and a loopback address on the second, and asserts that the pinned connection holds. It covers every encoding above, redirect chains into private space, and IPv6 mappings.
+The test suite is the point of this project.
 
 ```bash
-npm test
+npm test              # 62 tests, hermetic — no network
+npm run test:online   # opt-in: proves real public requests still work
 ```
+
+It runs a DNS server the suite owns, which answers with an allowed address on the first query and the metadata endpoint on every one after. The rebinding test then asserts three things: the body came from the intended origin, the connection landed on the validated address, and **exactly one** DNS query was made for the whole request. That last assertion is the one that matters — a second query would mean the HTTP stack re-resolved, which is precisely the window this library exists to close. It is checked by counting packets at a server we control, not by reading the code and hoping.
+
+The rest covers every encoding in the table, both IPv4-mapped IPv6 forms, a name with one public and one private A record, redirect chains that turn private at hop 1 and at hop 2, `Authorization` stripping across an origin change, and a 32 MB response aborted at a 256 KB cap.
+
+`npm run test:online` is separate on purpose: a library that blocks everything passes the entire bypass corpus and is useless.
 
 ## License
 
