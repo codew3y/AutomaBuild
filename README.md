@@ -1,10 +1,12 @@
 # automa-safe-fetch
 
 [![CI](https://github.com/codew3y/automa-safe-fetch/actions/workflows/ci.yml/badge.svg)](https://github.com/codew3y/automa-safe-fetch/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/automa-safe-fetch)](https://www.npmjs.com/package/automa-safe-fetch)
+[![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)](https://www.npmjs.com/package/automa-safe-fetch?activeTab=dependencies)
 
 An HTTP client for applications that fetch URLs supplied by their users — without letting those users reach the inside of your network.
 
-> **Status:** v0.1.0, not yet published to npm. Part of the [AutomaBuild](https://github.com/codew3y/AutomaBuild) workflow-automation platform (component A of four).
+> **Status:** v0.1.0 on npm, published with provenance. Part of the [AutomaBuild](https://github.com/codew3y/AutomaBuild) workflow-automation platform (component A of four).
 >
 > Zero runtime dependencies. Node >= 20.6.
 
@@ -60,6 +62,12 @@ Ranges follow [RFC 6890](https://www.rfc-editor.org/rfc/rfc6890), the special-pu
 Ports are also allow-listed: `80`, `443`, `8080`, `8443` by default.
 
 Every one of these is overridable — `allowedRanges` punches a hole through the deny-list for a range you genuinely mean to reach, and is checked first.
+
+## Install
+
+```bash
+npm install automa-safe-fetch
+```
 
 ## Usage
 
