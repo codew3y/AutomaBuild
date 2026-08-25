@@ -2,9 +2,24 @@
   "name": "automa-safe-fetch",
   "version": "0.1.0",
   "description": "An HTTP client for applications that fetch user-supplied URLs, without letting those users reach the inside of your network. SSRF defence: resolve, validate, pin.",
-  "keywords": ["ssrf", "fetch", "security", "dns-rebinding", "webhook", "http-client"],
+  "keywords": [
+    "ssrf",
+    "fetch",
+    "security",
+    "dns-rebinding",
+    "webhook",
+    "http-client"
+  ],
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/codew3y/automa-safe-fetch.git" },
+  "author": "Wey Tongol",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codew3y/automa-safe-fetch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/codew3y/automa-safe-fetch/issues"
+  },
+  "homepage": "https://github.com/codew3y/automa-safe-fetch#readme",
   "type": "module",
   "exports": {
     ".": {
@@ -13,8 +28,15 @@
     }
   },
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md", "LICENSE"],
-  "engines": { "node": ">=20.6.0" },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.6.0"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

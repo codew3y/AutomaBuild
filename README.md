@@ -1,5 +1,7 @@
 # automa-safe-fetch
 
+[![CI](https://github.com/codew3y/automa-safe-fetch/actions/workflows/ci.yml/badge.svg)](https://github.com/codew3y/automa-safe-fetch/actions/workflows/ci.yml)
+
 An HTTP client for applications that fetch URLs supplied by their users — without letting those users reach the inside of your network.
 
 > **Status:** v0.1.0, not yet published to npm. Part of the [AutomaBuild](https://github.com/codew3y/AutomaBuild) workflow-automation platform (component A of four).
@@ -140,7 +142,7 @@ One residual gap worth naming: validation happens per request, so a name that pa
 The test suite is the point of this project.
 
 ```bash
-npm test              # 62 tests, hermetic — no network
+npm test              # 84 tests, hermetic — no network
 npm run test:online   # opt-in: proves real public requests still work
 ```
 
@@ -148,7 +150,13 @@ It runs a DNS server the suite owns, which answers with an allowed address on th
 
 The rest covers every encoding in the table, both IPv4-mapped IPv6 forms, a name with one public and one private A record, redirect chains that turn private at hop 1 and at hop 2, `Authorization` stripping across an origin change, and a 32 MB response aborted at a 256 KB cap.
 
+The TLS tests generate throwaway certificates with `openssl` at run time and prove the certificate is verified against the *hostname* over a socket opened to the pinned IP — the failure mode where pinning silently discards the server's identity. They skip themselves if `openssl` is not on PATH.
+
 `npm run test:online` is separate on purpose: a library that blocks everything passes the entire bypass corpus and is useless.
+
+## Reporting a bypass
+
+Privately, through [GitHub's private vulnerability reporting](https://github.com/codew3y/automa-safe-fetch/security). See [SECURITY.md](SECURITY.md) for what counts and what is out of scope.
 
 ## License
 
