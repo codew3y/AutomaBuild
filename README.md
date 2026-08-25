@@ -6,7 +6,7 @@
 
 An HTTP client for applications that fetch URLs supplied by their users — without letting those users reach the inside of your network.
 
-> **Status:** v0.1.0 on npm, published with provenance. Part of the [AutomaBuild](https://github.com/codew3y/AutomaBuild) workflow-automation platform (component A of four).
+> **Status:** on npm, published from CI with provenance. Part of the [AutomaBuild](https://github.com/codew3y/AutomaBuild) workflow-automation platform (component A of four).
 >
 > Zero runtime dependencies. Node >= 20.6.
 
