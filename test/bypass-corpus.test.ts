@@ -1,8 +1,8 @@
 /**
  * The bypass corpus.
  *
- * One test per line of the list in BRIEF.md. Each names the trick, so a
- * failure tells you which bypass regressed rather than that "a test broke".
+ * One test per known bypass. Each names the trick, so a failure tells you
+ * which bypass regressed rather than that "a test broke".
  *
  * Nothing here touches the network: URL-shape and literal-address cases are
  * refused before DNS, and the name-based cases are answered by a DNS server

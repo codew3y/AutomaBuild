@@ -27,3 +27,6 @@ tmp/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# working notes, not for publication — kept locally, never committed
+BRIEF.md
