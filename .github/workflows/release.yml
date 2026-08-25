@@ -1,10 +1,18 @@
-# Publishes to npm with provenance, on a pushed tag.
+# Publishes to npm on a pushed tag, via trusted publishing (OIDC).
 #
-# Provenance requires `id-token: write` and npm >= 9.5. It links the published
-# tarball back to this workflow run and this commit, so an installer can verify
-# where the code came from — which matters rather a lot for a security library.
+# There is no npm token. GitHub mints a short-lived OIDC token that npm
+# verifies against the trusted publisher configured on the package — this
+# repository, this workflow filename. Nothing long-lived exists to leak, expire,
+# or rotate.
 #
-# Requires an NPM_TOKEN secret with publish rights (automation token).
+# npm is retiring token-based publishing in January 2027, so this is also the
+# path that keeps working.
+#
+# Provenance is signed from the same identity, linking the published tarball to
+# this workflow run and this commit.
+#
+# Requires: `id-token: write`, npm >= 11.5.1 (Node 24 ships 11.x), and a trusted
+# publisher registered at npmjs.com for codew3y/automa-safe-fetch → release.yml.
 name: Release
 
 on:
@@ -19,7 +27,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Fail before anything is published if the tag and the manifest disagree.
       # Tagging v0.2.0 against version 0.1.0 would otherwise quietly republish
@@ -34,14 +42,15 @@ jobs:
           fi
           echo "Publishing version ${PKG}"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+      # No NODE_AUTH_TOKEN. Authentication is the OIDC token above.
       - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
