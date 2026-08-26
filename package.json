@@ -1,0 +1,21 @@
+{
+  "name": "automa-durable-runner",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A multi-step task engine that does not lose work when a machine dies, and does not repeat work it has already done.",
+  "license": "MIT",
+  "author": "Wey Tongol",
+  "repository": { "type": "git", "url": "git+https://github.com/codew3y/automa-durable-runner.git" },
+  "type": "module",
+  "engines": { "node": ">=22.18.0" },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test --test-concurrency=1 \"test/*.test.ts\"",
+    "test:watch": "node --test --watch \"test/*.test.ts\"",
+    "coverage": "node --test --test-concurrency=1 --experimental-test-coverage \"test/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  }
+}
