@@ -44,6 +44,27 @@ export class SystemClock implements Clock {
   }
 }
 
+/**
+ * Let woken code run before the clock considers the next deadline.
+ *
+ * Yielding a couple of microtasks is not enough: a worker that wakes, awaits a
+ * database round trip, and then sleeps again does not register its next sleep
+ * until a macrotask has run. With only microtask yields the clock decides
+ * nothing is pending, jumps to the target, and the worker is stranded forever
+ * — the failure mode being that the fake clock breaks on precisely the async
+ * shape it exists to test.
+ *
+ * `setImmediate` drains the microtask queue and the immediate queue together,
+ * and looping it a few times covers a chain that re-defers.
+ */
+async function drainTasks(): Promise<void> {
+  for (let i = 0; i < 4; i++) {
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve)
+    })
+  }
+}
+
 interface PendingSleep {
   readonly dueAt: Millis
   readonly resolve: () => void
@@ -110,9 +131,7 @@ export class FakeClock implements Clock {
       this.#now = next.dueAt
       this.#pending = this.#pending.filter((p) => p !== next)
       next.resolve()
-      // Let the woken task run before considering the next deadline.
-      await Promise.resolve()
-      await Promise.resolve()
+      await drainTasks()
     }
     this.#now = target
   }

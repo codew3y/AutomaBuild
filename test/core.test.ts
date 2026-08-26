@@ -60,6 +60,32 @@ describe('FakeClock', () => {
     assert.deepEqual(seen, [100, 200, 300])
   })
 
+  it('does not strand a sleeper that does real async work before sleeping again', async () => {
+    // Regression. Yielding a couple of microtasks between wakes is not enough:
+    // a worker that wakes, awaits a database round trip, then sleeps again
+    // registers its next sleep only after a macrotask. The clock used to
+    // conclude nothing was pending, jump to the target, and strand it forever
+    // — the fake clock failing on precisely the shape it exists to test.
+    const clock = new FakeClock(0)
+    let finished = false
+    const worker = (async () => {
+      await clock.sleep(100)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      await clock.sleep(100)
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      await clock.sleep(100)
+      finished = true
+    })()
+
+    await clock.advance(300)
+    await Promise.race([
+      worker,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('stranded')), 500)),
+    ])
+    assert.equal(finished, true)
+    assert.equal(clock.now(), 300)
+  })
+
   it('wakes same-instant sleepers in the order they parked', async () => {
     const clock = new FakeClock(0)
     const order: number[] = []

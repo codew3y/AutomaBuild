@@ -23,12 +23,24 @@ export interface BackoffPolicy {
   readonly capMs: number
   /** Total attempts permitted, including the first. */
   readonly maxAttempts: number
+  /**
+   * Ceiling on retries that do *not* consume an attempt.
+   *
+   * Rate limits and token expiry deliberately cost no attempts, so that a
+   * provider having a busy afternoon cannot exhaust a step that never really
+   * failed. Without a separate ceiling, though, "costs no attempts" means
+   * "retries forever": a permanently rate-limited destination would keep one
+   * step alive indefinitely. This bounds that, and exhaustion sends the step
+   * to the DLQ where an operator can see it.
+   */
+  readonly maxDeferrals: number
 }
 
 export const DEFAULT_BACKOFF: BackoffPolicy = {
   baseMs: 1_000,
   capMs: 900_000, // 15 minutes
   maxAttempts: 5,
+  maxDeferrals: 20,
 }
 
 /**
@@ -114,4 +126,5 @@ export function assertPolicyValid(policy: BackoffPolicy): void {
     throw new RangeError(`capMs (${policy.capMs}) must be >= baseMs (${policy.baseMs})`)
   }
   if (policy.maxAttempts < 1) throw new RangeError('maxAttempts must be >= 1')
+  if (policy.maxDeferrals < 1) throw new RangeError('maxDeferrals must be >= 1')
 }

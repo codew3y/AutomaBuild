@@ -30,11 +30,21 @@ export interface StepRetryState {
    * availability rather than our request — rate limits, token expiry.
    */
   readonly attemptsConsumed: number
+  /**
+   * Retries that deliberately cost no attempt.
+   *
+   * Counted separately for two reasons: they need their own ceiling, or
+   * "costs no attempt" becomes "retries forever"; and they need their own
+   * backoff ladder, or a rate-limited step retries at a flat interval against
+   * a provider that is already asking it to slow down.
+   */
+  readonly deferrals: number
 }
 
 export const INITIAL_RETRY_STATE: StepRetryState = {
   attemptsStarted: 0,
   attemptsConsumed: 0,
+  deferrals: 0,
 }
 
 export type RetryOutcome =
@@ -94,9 +104,11 @@ export function onAttemptFailed(
   const decision = decideRetry(failure.errorClass, { idempotent: failure.idempotent })
 
   const consumed = state.attemptsConsumed + (decision.consumesAttempt ? 1 : 0)
+  const deferrals = state.deferrals + (decision.retry && !decision.consumesAttempt ? 1 : 0)
   const next: StepRetryState = {
     attemptsStarted: state.attemptsStarted,
     attemptsConsumed: consumed,
+    deferrals,
   }
 
   if (!decision.retry) {
@@ -108,7 +120,7 @@ export function onAttemptFailed(
     }
   }
 
-  if (attemptsRemaining(consumed, policy) === 0) {
+  if (decision.consumesAttempt && attemptsRemaining(consumed, policy) === 0) {
     return {
       kind: 'exhausted',
       state: next,
@@ -116,15 +128,33 @@ export function onAttemptFailed(
     }
   }
 
-  // The window is sized on consumed attempts, not on attempts started. A step
-  // that was rate-limited nine times and has failed once for real is early in
-  // its ladder, not deep into it, and should not wait as though it were.
+  // A deferral costs no attempt, so without its own ceiling a permanently
+  // rate-limited or un-refreshable step would retry until the heat death of
+  // the universe. Exhausting here puts it in the DLQ, where someone can see it.
+  if (!decision.consumesAttempt && deferrals >= policy.maxDeferrals) {
+    return {
+      kind: 'exhausted',
+      state: next,
+      reason: `deferred ${deferrals} times without progress (limit ${policy.maxDeferrals}); last failure was ${failure.errorClass}`,
+    }
+  }
+
+  // Two independent ladders.
   //
-  // `consumed` is passed directly, not `consumed + 1`: after the first real
+  // A real failure is paced by consumed attempts, so a step that was
+  // rate-limited nine times and has now failed once for real is early in its
+  // ladder and does not wait as though it were deep into it.
+  //
+  // A deferral is paced by deferrals, so repeated rate limiting backs off
+  // progressively instead of retrying every second against a provider that is
+  // already telling us to slow down.
+  //
+  // Either counter is passed directly rather than incremented: after the first
   // failure the step waits one base window, so the exponent is zero. Passing
   // the next attempt's number instead doubles every delay in the ladder.
+  const ladderPosition = decision.consumesAttempt ? consumed : deferrals
   const delay = computeRetryDelay({
-    attempt: Math.max(1, consumed),
+    attempt: Math.max(1, ladderPosition),
     policy,
     random: deps.random,
     retryAfterMs: failure.retryAfterMs ?? null,

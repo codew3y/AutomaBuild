@@ -73,7 +73,12 @@ describe('the retry ladder', () => {
     // has no budget left. The window doubles until it hits the cap and then
     // stays there — an unbounded ladder would eventually schedule a retry
     // years out and look, from the outside, exactly like a lost run.
-    const policy: BackoffPolicy = { baseMs: 1_000, capMs: 5_000, maxAttempts: 10 }
+    const policy: BackoffPolicy = {
+      baseMs: 1_000,
+      capMs: 5_000,
+      maxAttempts: 10,
+      maxDeferrals: 20,
+    }
     const { outcomes } = simulateLadder({
       failures: Array.from({ length: 10 }, () => IDEMPOTENT),
       random: alwaysRandom(0.999999),
@@ -87,28 +92,92 @@ describe('the retry ladder', () => {
 })
 
 describe('rate limiting does not consume the retry budget', () => {
-  it('survives twenty 429s with every attempt intact', () => {
+  const rateLimited = { errorClass: 'rate_limited' as const, idempotent: true }
+
+  it('survives many 429s with every attempt intact', () => {
     // The scenario this rule exists for: a provider having a busy afternoon
     // must not be able to exhaust a step that has not actually failed.
     const { outcomes, finalState } = simulateLadder({
-      failures: Array.from({ length: 20 }, () => ({
-        errorClass: 'rate_limited' as const,
-        idempotent: true,
-      })),
+      failures: Array.from({ length: 19 }, () => rateLimited),
       random: seededRandom(1),
     })
 
-    assert.equal(outcomes.length, 20, 'none of these should have been terminal')
+    assert.equal(outcomes.length, 19, 'none of these should have been terminal')
     assert.ok(outcomes.every((o) => o.kind === 'retry'))
     assert.equal(finalState.attemptsConsumed, 0, 'a 429 must not count as an attempt')
-    assert.equal(finalState.attemptsStarted, 20)
+    assert.equal(finalState.deferrals, 19)
+  })
+
+  it('still gives up eventually — "no attempt cost" must not mean "forever"', () => {
+    // Regression: without a deferral ceiling, a permanently rate-limited
+    // destination keeps one step alive indefinitely. It costs no attempts, so
+    // nothing else stops it.
+    const { outcomes, finalState } = simulateLadder({
+      failures: Array.from({ length: 25 }, () => rateLimited),
+      random: seededRandom(1),
+    })
+
+    const last = outcomes.at(-1)
+    assert.equal(last?.kind, 'exhausted', 'a step must not defer forever')
+    assert.equal(outcomes.length, DEFAULT_BACKOFF.maxDeferrals)
+    assert.equal(finalState.attemptsConsumed, 0)
+    assert.match(last.reason, /deferred 20 times without progress/)
+  })
+
+  it('backs off progressively while being rate limited', () => {
+    // Regression: deferrals used to be paced by the consumed-attempt counter,
+    // which never moves for a 429 — so every retry waited the same ~1s and we
+    // hammered a provider that was already asking us to slow down.
+    const { outcomes } = simulateLadder({
+      failures: Array.from({ length: 5 }, () => rateLimited),
+      random: alwaysRandom(0.999999),
+    })
+    const delays = outcomes.filter((o) => o.kind === 'retry').map((o) => o.delayMs)
+    assert.deepEqual(delays, [999, 1999, 3999, 7999, 15999])
+  })
+
+  it('bounds auth_expired too, which is otherwise identical', () => {
+    // Regression: auth_expired is retryable and consumes no attempt. Escalation
+    // to auth_broken depends on the *caller* reporting that a refresh was
+    // already tried — which the state machine cannot enforce. Left unbounded,
+    // a step whose refresh silently no-ops retries forever.
+    const { outcomes } = simulateLadder({
+      failures: Array.from({ length: 30 }, () => ({
+        errorClass: 'auth_expired' as const,
+        idempotent: true,
+      })),
+      random: seededRandom(2),
+    })
+    assert.equal(outcomes.at(-1)?.kind, 'exhausted')
+    assert.ok(outcomes.length <= DEFAULT_BACKOFF.maxDeferrals)
+  })
+
+  it('keeps the two ladders independent', () => {
+    // A real failure after a run of rate limits is early in the attempt
+    // ladder, even though the deferral ladder is well advanced.
+    const failures: AttemptFailure[] = [
+      ...Array.from({ length: 5 }, () => rateLimited),
+      IDEMPOTENT,
+    ]
+    const { outcomes, finalState } = simulateLadder({
+      failures,
+      random: alwaysRandom(0.999999),
+    })
+    const deferralDelays = outcomes.slice(0, 5).map((o) => (o.kind === 'retry' ? o.delayMs : -1))
+    assert.deepEqual(deferralDelays, [999, 1999, 3999, 7999, 15999])
+
+    const afterRealFailure = outcomes[5]
+    assert.equal(afterRealFailure?.kind, 'retry')
+    assert.equal(afterRealFailure.delayMs, 999, 'the attempt ladder starts at its own base')
+    assert.equal(finalState.attemptsConsumed, 1)
+    assert.equal(finalState.deferrals, 5)
   })
 
   it('keeps the backoff window early when only rate limits have occurred', () => {
     // Window is sized on consumed attempts. Nine rate limits then one real
     // failure is early in the ladder, and must not wait as if it were deep in.
     const failures: AttemptFailure[] = [
-      ...Array.from({ length: 9 }, () => ({ errorClass: 'rate_limited' as const, idempotent: true })),
+      ...Array.from({ length: 9 }, () => rateLimited),
       IDEMPOTENT,
     ]
     const { outcomes } = simulateLadder({ failures, random: alwaysRandom(0.999999) })
