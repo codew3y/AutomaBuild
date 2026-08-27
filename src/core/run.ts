@@ -36,6 +36,8 @@ export interface StepRun {
 export interface RunRecord {
   readonly id: string
   readonly startedAt: string
+  /** Absent while the run is still going. */
+  readonly finishedAt?: string
   readonly status: 'succeeded' | 'failed' | 'cancelled' | 'running'
   /** The graph as it was when this ran. */
   readonly graph: FlowGraph
@@ -81,6 +83,20 @@ export interface RunSummary {
   readonly totalMs: number
 }
 
+/**
+ * Counts, and how long the run took.
+ *
+ * `totalMs` is wall clock from start to finish when the run has finished, and
+ * falls back to the sum of the step durations when it has not — or when the
+ * record came from somewhere that does not carry a finish time.
+ *
+ * The two are genuinely different numbers: wall clock includes the wait
+ * between steps and the backoff between retries, and the sum does not. Wall
+ * clock is the one that answers "why did this take so long", so it wins where
+ * both are available. What must not happen is the history list using one and
+ * the header the other, which is what they did before this: the same run
+ * showed two different totals on the same screen.
+ */
 export function summarise(run: RunRecord): RunSummary {
   let succeeded = 0
   let failed = 0
@@ -94,7 +110,15 @@ export function summarise(run: RunRecord): RunSummary {
     totalMs += step.durationMs ?? 0
   }
 
-  return { succeeded, failed, notReached, totalMs }
+  const elapsed =
+    run.finishedAt === undefined ? undefined : Date.parse(run.finishedAt) - Date.parse(run.startedAt)
+
+  return {
+    succeeded,
+    failed,
+    notReached,
+    totalMs: elapsed === undefined || Number.isNaN(elapsed) || elapsed < 0 ? totalMs : elapsed,
+  }
 }
 
 /** Outputs of the steps that actually produced one, for the mapping preview. */

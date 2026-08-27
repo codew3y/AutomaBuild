@@ -97,3 +97,40 @@ describe('run history', () => {
     })
   })
 })
+
+describe('how long a run took', () => {
+  const withSteps = (over: Partial<RunRecord>): RunRecord => ({
+    id: 'r',
+    startedAt: '2026-03-01T09:00:00.000Z',
+    status: 'succeeded',
+    graph,
+    steps: [
+      { nodeId: 'a', outcome: 'succeeded', durationMs: 100 },
+      { nodeId: 'b', outcome: 'succeeded', durationMs: 200 },
+    ],
+    ...over,
+  })
+
+  test('a finished run reports wall clock, not the sum of its steps', () => {
+    // The two differ by everything that happened between steps: the queue
+    // wait, and the backoff between retries. Wall clock is the number that
+    // answers "why did this take so long".
+    const listing = describeRun(withSteps({ finishedAt: '2026-03-01T09:00:05.000Z' }))
+    assert.equal(listing.totalMs, 5000)
+    assert.notEqual(listing.totalMs, 300)
+  })
+
+  test('a run still going falls back to the time spent in steps', () => {
+    const listing = describeRun(withSteps({ status: 'running' }))
+    assert.equal(listing.totalMs, 300)
+  })
+
+  test('a nonsense finish time does not produce a negative or NaN duration', () => {
+    assert.equal(describeRun(withSteps({ finishedAt: 'not a date' })).totalMs, 300)
+    assert.equal(
+      describeRun(withSteps({ finishedAt: '2026-03-01T08:59:00.000Z' })).totalMs,
+      300,
+      'a finish before the start is clock skew, not a negative run',
+    )
+  })
+})

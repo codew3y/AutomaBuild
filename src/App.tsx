@@ -587,10 +587,24 @@ function Editor() {
               {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : 'Unsaved'}
             </span>
 
+            {/*
+              Disabled, and it says why.
+
+              Enabled and inert is the worst of the options: a button that
+              looks like it did something. The write path does not exist yet —
+              the server compiles a flow at startup and the engine holds one
+              flow definition per worker, so accepting a new version while runs
+              of the old one are in flight needs the engine to resolve a flow
+              by version first. Until then this is honest about being unbuilt.
+            */}
             <button
               className="publish"
-              disabled={!publishable}
-              title={publishable ? 'Publish this version' : 'Fix the errors listed first'}
+              disabled
+              title={
+                publishable
+                  ? 'Not built yet — the server runs a flow configured at startup'
+                  : 'Fix the errors listed first'
+              }
             >
               Publish
             </button>
