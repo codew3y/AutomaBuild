@@ -125,24 +125,82 @@ export async function sweep(pool: Pool, options: SweepOptions = {}): Promise<Swe
 }
 
 /**
- * Are partitions being created?
+ * How many days of partitions exist ahead of today, per partitioned table.
  *
- * Partition maintenance failing is silent until the premake window runs out,
- * at which point every insert fails at once because there is no default
- * partition to catch them. This is the metric to alert on, and it belongs in
- * the project rather than in a runbook written later.
+ * This metric has to exist before it is needed, not after. Partition
+ * maintenance failing is completely silent: everything works normally right up
+ * to the moment the premake window runs out, and then every insert fails at
+ * once, because there is deliberately no default partition to catch them.
+ * Nothing degrades first, and nothing appears in any log.
+ *
+ * Counted as days ahead of today rather than total partitions, because the
+ * total keeps rising as history accumulates — it would look healthy while the
+ * future ran out.
  */
-export async function futurePartitionCount(pool: Pool, table: string): Promise<number> {
-  const { rows } = await pool.query<{ count: string }>(
-    `SELECT count(*)::text AS count
-       FROM pg_inherits i
-       JOIN pg_class c ON c.oid = i.inhrelid
-       JOIN pg_class p ON p.oid = i.inhparent
-      WHERE p.relname = $1
-        AND pg_get_expr(c.relpartbound, c.oid) ~ 'FROM'
-        AND substring(pg_get_expr(c.relpartbound, c.oid) from $$FROM \\('([^']+)'$$)::timestamptz
-            >= date_trunc('day', now())`,
-    [table],
+export interface PartitionHealth {
+  readonly table: string
+  readonly daysAhead: number
+  readonly healthy: boolean
+}
+
+/** Below this much headroom, somebody should be told. */
+export const PARTITION_HEADROOM_WARNING_DAYS = 3
+
+export async function partitionHealth(
+  pool: Pool,
+  tables: readonly string[] = ['runs', 'step_executions'],
+): Promise<PartitionHealth[]> {
+  // Read the date from the partition *name* rather than parsing the bound
+  // expression. pg_partman names daily partitions `<parent>_pYYYYMMDD`, and
+  // that is far easier to get right than a regex over
+  // `FOR VALUES FROM ('...') TO ('...')` — which has to survive being escaped
+  // through a SQL string literal on its way to the regex engine, and which
+  // silently returns NULL rather than erroring when it does not.
+  const { rows } = await pool.query<{ parent: string; days_ahead: string }>(
+    `WITH partitions AS (
+       SELECT p.relname AS parent,
+              substring(c.relname from '_p([0-9]{8})$') AS day_suffix
+         FROM pg_inherits i
+         JOIN pg_class c ON c.oid = i.inhrelid
+         JOIN pg_class p ON p.oid = i.inhparent
+        WHERE p.relname = ANY($1::text[])
+     )
+     SELECT parent,
+            count(*) FILTER (
+              WHERE day_suffix IS NOT NULL
+                AND to_date(day_suffix, 'YYYYMMDD') >= current_date
+            )::text AS days_ahead
+       FROM partitions
+      GROUP BY parent`,
+    [tables],
   )
-  return Number(rows[0]?.count ?? 0)
+
+  const byTable = new Map(rows.map((row) => [row.parent, Number(row.days_ahead)]))
+  return tables.map((table) => {
+    const daysAhead = byTable.get(table) ?? 0
+    return { table, daysAhead, healthy: daysAhead >= PARTITION_HEADROOM_WARNING_DAYS }
+  })
+}
+
+/**
+ * Throw if any partitioned table is running out of future partitions.
+ *
+ * For a readiness probe or a scheduled check. Failing loudly here costs far
+ * less than discovering it when writes start rejecting.
+ */
+export async function assertPartitionHeadroom(
+  pool: Pool,
+  tables?: readonly string[],
+): Promise<PartitionHealth[]> {
+  const health = await partitionHealth(pool, tables)
+  const starved = health.filter((entry) => !entry.healthy)
+  if (starved.length > 0) {
+    throw new Error(
+      `Partition headroom exhausted: ${starved
+        .map((entry) => `${entry.table} has ${entry.daysAhead} day(s) ahead`)
+        .join('; ')}. pg_partman maintenance is probably not running, and once ` +
+        `the window closes every insert fails at once — there is no default partition.`,
+    )
+  }
+  return health
 }

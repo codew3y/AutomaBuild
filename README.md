@@ -28,15 +28,61 @@ There is a further trap. No queue delivers a message exactly once. Every serious
 - **Timeouts at four layers**, each shorter than its parent.
 - **Dead-letter queue**, cancellation, resume-from-step, and per-tenant concurrency limits.
 
-## The demo
+## Try it
 
 ```bash
+docker compose up -d      # Postgres 18 with pg_partman + pg_cron, and Redis
+npm ci && npm run db:migrate
 npm run demo:chaos
 ```
 
-Starts a three-step run and kills a worker mid-step. The run completes on another worker. The API that was already called is not called again.
+## The demo
+
+`npm run demo:chaos` forks worker processes, starts a batch of runs, and `SIGKILL`s a worker at random while steps are in flight. SIGKILL specifically — no handler runs, no lease is released, no result is written. From the database's point of view a step is `running`, owned by a process that no longer exists.
+
+A recent run in CI:
+
+```
+workers SIGKILLed        57
+runs succeeded           20/20
+step attempts made       110  (for 80 steps)
+steps re-executed        30
+  ...effect already done 22  (deduplicated by key)
+distinct side effects    80/80
+
+PASS — no work lost, no effect repeated.
+```
+
+The line that matters is `effect already done`. Twenty-two times, a process died holding a side effect it had completed but not yet recorded — the exact state that produces a second invoice in an engine assuming exactly-once delivery. Another worker picked each step up, presented **the same idempotency key**, and the effect still happened once.
+
+A run where nothing was re-executed has proved nothing, and the demo says so rather than printing a green tick.
 
 That test is the entire point of this repository.
+
+## The CLI
+
+```bash
+npm run cli -- run examples/hello.json --watch
+npm run cli -- status <runId> <startedAt>
+npm run cli -- resume <runId> <startedAt> <nodeId>   # re-run from a step
+npm run cli -- dlq                                    # what needs a human
+npm run cli -- replay <dlqEntryId>
+npm run cli -- health                                 # partition headroom
+```
+
+A flow is a JSON file:
+
+```json
+{
+  "nodes": [
+    { "id": "fetch", "kind": "http", "idempotent": true,
+      "config": { "url": "https://example.com/" } },
+    { "id": "done",  "kind": "noop", "idempotent": true }
+  ]
+}
+```
+
+`idempotent` has no default, deliberately. It decides whether an ambiguous failure is retried or paused for a human, and guessing on your behalf is precisely the wrong call to make silently.
 
 ## Error classes
 
@@ -53,6 +99,12 @@ Every failure maps to exactly one class, and the class decides what happens next
 | `poison` | no — straight to DLQ | — |
 
 `unknown_outcome` is the class most implementations omit, and it is the one that causes duplicate invoices.
+
+## Resume and replay
+
+Because every step's input and output is persisted independently, resuming is a query rather than a feature. Resuming from step *N* marks the steps before it `skipped_resumed` — **keeping their outputs**, so downstream expressions still resolve — and resets the rest.
+
+Resumed steps get a **new attempt group**, which changes their idempotency keys. That is the point: an automatic retry says *"this may already have happened, please deduplicate"*, while an operator replay says *"do it again, I have looked at it and I mean it"*. Reusing the old key would make the provider decline the very work being asked for.
 
 ## Not included
 
