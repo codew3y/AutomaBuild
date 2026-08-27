@@ -41,6 +41,7 @@ import { createAutosave, type SaveState } from './core/patch.ts'
 import { outputTree, referenceFor, resolveTemplate } from './core/resolve.ts'
 import { buildRunView, summarise, type RunRecord } from './core/run.ts'
 import { describeRun, relativeTime, sortHistory, type RunListing } from './core/history.ts'
+import { diffGraph } from './core/patch.ts'
 import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
 import { SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
@@ -203,6 +204,19 @@ function Editor() {
   const [restored, setRestored] = useState(false)
   const [setupOpen, setSetupOpen] = useState(false)
 
+  /**
+   * What is live, and how the draft compares to it.
+   *
+   * `published` is the graph the server is running. `publishState` is the
+   * request in flight. Divergence is derived from the two graphs rather than
+   * stored, for the same reason validation is: a stored flag has to be kept in
+   * sync, and one that says "published" while the draft has moved on is worse
+   * than no indicator at all.
+   */
+  const [published, setPublished] = useState<{ versionId: string; graph: FlowGraph } | null>(null)
+  const [publishState, setPublishState] = useState<'ready' | 'sending' | 'error'>('ready')
+  const [publishError, setPublishError] = useState<string | null>(null)
+
   const { screenToFlowPosition } = useReactFlow()
 
   const canUndo = useStore(graphStore.temporal, (state) => state.pastStates.length > 0)
@@ -276,6 +290,91 @@ function Editor() {
       cancelled = true
     }
   }, [])
+
+  // What is live, fetched once. A 404 means nothing has been published yet,
+  // which is a state rather than an error.
+  useEffect(() => {
+    let cancelled = false
+    fetch('api/flows/published')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: { versionId: string; graph: FlowGraph } | null) => {
+        if (cancelled || data === null || !Array.isArray(data.graph?.nodes)) return
+        setPublished({ versionId: data.versionId, graph: data.graph })
+      })
+      .catch(() => {
+        // No backend. Publishing is simply unavailable, which the button says.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  /**
+   * Has the draft moved away from what is live?
+   *
+   * Layout counts. Moving a node lights this up, and that is deliberate rather
+   * than an oversight: the published graph is what the run viewer draws, so
+   * positions are part of what gets published. A flow rearranged but not
+   * published would otherwise show every past run on a layout nobody is
+   * looking at any more.
+   */
+  const diverged = useMemo(() => {
+    if (published === null) return false
+    return diffGraph(published.graph, graph).length > 0
+  }, [published, graph])
+
+  const publish = useCallback(() => {
+    setPublishState('sending')
+    setPublishError(null)
+    const snapshot = graphStore.getState().snapshot()
+
+    fetch('api/flows/published', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ graph: snapshot }),
+    })
+      .then(async (response) => {
+        const data = (await response.json()) as {
+          versionId?: string
+          error?: string
+          problems?: { message: string }[]
+        }
+        if (!response.ok) {
+          // The server compiles too, and refuses things the editor's own
+          // validation does not catch — a branch, for one. Showing its list
+          // rather than a generic failure is the difference between "it did
+          // not work" and knowing what to change.
+          throw new Error(
+            data.problems?.map((problem) => problem.message).join('; ') ??
+              data.error ??
+              `publish failed (${response.status})`,
+          )
+        }
+        setPublished({ versionId: data.versionId!, graph: snapshot })
+        setPublishState('ready')
+      })
+      .catch((error: unknown) => {
+        setPublishError(error instanceof Error ? error.message : String(error))
+        setPublishState('error')
+      })
+  }, [])
+
+  /**
+   * Go back to what is live.
+   *
+   * Through `replaceGraph`, which runs inside the store's temporal wrapper, so
+   * this lands on the undo stack and ctrl-Z brings the work back. That is what
+   * makes discarding safe enough not to need a modal — and it is easy to lose
+   * by "optimising" the reset to bypass the store.
+   */
+  const discard = useCallback(() => {
+    if (published === null) return
+    graphStore.getState().replaceGraph(published.graph)
+    graphStore.endGesture()
+    editorStore.getState().select(null)
+    setPublishError(null)
+    setPublishState('ready')
+  }, [published])
 
   const pickRun = useCallback(
     (id: string) => {
@@ -583,31 +682,67 @@ function Editor() {
               Redo
             </button>
 
+            {/*
+              "Draft saved" rather than "Saved".
+
+              This is about localStorage, and next to a button offering to
+              publish, a bare "Saved" reads as "your changes are live" — two
+              contradictory signals about the same flow. Naming the thing it
+              actually refers to is what keeps them from arguing.
+            */}
             <span className={`save save-${saveState}`}>
-              {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : 'Unsaved'}
+              {saveState === 'saved'
+                ? 'Draft saved'
+                : saveState === 'saving'
+                  ? 'Saving…'
+                  : 'Draft unsaved'}
             </span>
 
             {/*
-              Disabled, and it says why.
+              Three states, not two.
 
-              Enabled and inert is the worst of the options: a button that
-              looks like it did something. The write path does not exist yet —
-              the server compiles a flow at startup and the engine holds one
-              flow definition per worker, so accepting a new version while runs
-              of the old one are in flight needs the engine to resolve a flow
-              by version first. Until then this is honest about being unbuilt.
+              Nothing published yet: one button that says Publish. Published
+              and unchanged: a status, not a button, because pressing it would
+              mint a version identical to the last. Published and diverged:
+              publish the changes, or throw them away.
+
+              Discard appears only when there is something to discard. A
+              permanently visible one is noise almost all of the time.
             */}
-            <button
-              className="publish"
-              disabled
-              title={
-                publishable
-                  ? 'Not built yet — the server runs a flow configured at startup'
-                  : 'Fix the errors listed first'
-              }
-            >
-              Publish
-            </button>
+            {published !== null && !diverged ? (
+              <span className="published" title={`Live: version ${published.versionId}`}>
+                ✓ Published
+              </span>
+            ) : (
+              <>
+                {diverged && (
+                  <button
+                    className="discard"
+                    onClick={discard}
+                    disabled={publishState === 'sending'}
+                    title="Go back to the published version — ctrl-Z brings your changes back"
+                  >
+                    Discard
+                  </button>
+                )}
+                <button
+                  className="publish"
+                  disabled={!publishable || publishState === 'sending'}
+                  onClick={publish}
+                  title={
+                    publishable
+                      ? 'Send this flow to the server; new runs will use it'
+                      : 'Fix the errors listed first'
+                  }
+                >
+                  {publishState === 'sending'
+                    ? 'Publishing…'
+                    : published === null
+                      ? 'Publish'
+                      : 'Publish changes'}
+                </button>
+              </>
+            )}
           </>
         )}
 
@@ -618,6 +753,22 @@ function Editor() {
           </span>
         )}
       </header>
+
+      {publishError !== null && !viewing && (
+        <div className="restored publish-error" role="alert">
+          <span>Publish failed: {publishError}</span>
+          <button
+            className="dismiss"
+            aria-label="Dismiss"
+            onClick={() => {
+              setPublishError(null)
+              setPublishState('ready')
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {restored && !viewing && (
         <div className="restored" role="status">

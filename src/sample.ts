@@ -28,7 +28,12 @@ export interface StepSchema {
 export const SCHEMAS: Record<string, StepSchema> = {
   trigger: { fields: ['event'], label: 'Trigger' },
   http: { fields: ['url', 'method'], required: ['url'], label: 'HTTP request' },
-  transform: { fields: ['expression'], label: 'Transform' },
+  transform: {
+    fields: ['template'],
+    required: ['template'],
+    label: 'Transform',
+    multiline: ['template'],
+  },
   branch: { fields: ['condition'], required: ['condition'], label: 'Branch' },
   email: {
     fields: ['to', 'subject', 'body'],

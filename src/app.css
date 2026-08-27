@@ -492,3 +492,21 @@ button.danger.inline { width: auto; margin-top: 0; }
 .status-failed { color: var(--error); }
 .status-running { color: var(--accent); }
 .status-cancelled { color: var(--muted); }
+
+/* ------------------------------------------------------- publish state */
+
+/* Published and unchanged is a status, not a button: pressing it would mint a
+   version identical to the last one. It reads as calm rather than actionable. */
+.published {
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--ok);
+  padding: .3rem .5rem;
+}
+
+.discard { border-color: var(--warn); color: var(--warn); }
+
+.publish-error {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--fg);
+}
