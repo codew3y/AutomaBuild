@@ -50,7 +50,3 @@ jobs:
             }
           done
           echo "bundle contains the graph logic"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist
