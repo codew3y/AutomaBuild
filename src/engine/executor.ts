@@ -30,11 +30,38 @@ import {
   writeDlqEntry,
 } from './repository.ts'
 import { StepFailure, type HandlerRegistry, type StepContext } from './handlers.ts'
-import type { FlowDefinition, StepRow } from '../types.ts'
+import type { FlowDefinition, RunRow, StepRow } from '../types.ts'
+
+/**
+ * Find the flow a run was started on.
+ *
+ * Returning null means the version is gone. That is not retryable — every
+ * attempt would look for the same missing version — so the step fails
+ * deterministically rather than burning its attempt budget discovering it.
+ */
+export type FlowResolver = (
+  flowVersionId: string,
+) => FlowDefinition | null | Promise<FlowDefinition | null>
 
 export interface ExecutorDeps {
   readonly handlers: HandlerRegistry
-  readonly flow: FlowDefinition
+  /**
+   * The one flow this worker runs.
+   *
+   * Enough when nothing is ever republished. The moment a new version can be
+   * published while runs of the old one are in flight this is wrong: every
+   * step would be looked up in the newest definition, so a run already
+   * underway would start executing nodes it never had. Use `flows` then.
+   */
+  readonly flow?: FlowDefinition
+  /**
+   * Resolve a flow by the version its run was started on.
+   *
+   * Takes precedence over `flow`, and is what lets a publish be non-blocking:
+   * in-flight runs keep resolving the definition they began with, and only
+   * runs created afterwards see the new one.
+   */
+  readonly flows?: FlowResolver
   readonly workerId: string
   readonly random?: Random
   readonly backoff?: BackoffPolicy
@@ -77,6 +104,17 @@ export async function runStep(
   const policy = deps.backoff ?? DEFAULT_BACKOFF
   const random = deps.random ?? systemRandom
 
+  // The run is loaded before the claim rather than inside buildContext, because
+  // the claim needs its flow id and the flow lookup needs its version. It is
+  // not an extra query: buildContext used to load exactly this and now takes
+  // it as an argument.
+  const run = await withTransaction(pool, (tx) => getRun(tx, input.runStartedAt, input.runId))
+  if (run === null) {
+    // The run was deleted — a partition dropped, most likely — while a message
+    // for it was still in the queue. Nothing to execute and nothing to record.
+    return { kind: 'not_claimed' }
+  }
+
   // 1. Claim. Three outcomes, and telling them apart matters.
   const result = await withTransaction(pool, (tx) =>
     claimStep(tx, {
@@ -85,7 +123,7 @@ export async function runStep(
       workerId: deps.workerId,
       leaseMs: timeouts.stepAttemptMs * 2,
       tenantId: input.tenantId,
-      flowId: deps.flow.id,
+      flowId: run.flowId,
       ...(deps.limits === undefined ? {} : { limits: deps.limits }),
     }),
   )
@@ -121,15 +159,38 @@ export async function runStep(
 
   const claimed = result.step
 
-  const context = await buildContext(pool, claimed, deps, timeouts)
-
-  // 2. Execute, outside any transaction.
-  const handler = deps.handlers[claimed.stepKind]
+  // Resolved here, after the claim, so that a version which cannot be found
+  // fails this step through the ordinary path — recorded, classified,
+  // dead-lettered — rather than escaping into the worker loop.
+  let flow: FlowDefinition | null = null
   let output: unknown
   let failure: FailureFacts | null = null
   let failureMessage = ''
 
-  if (handler === undefined) {
+  try {
+    flow = await flowFor(deps, run)
+  } catch (error) {
+    if (!(error instanceof StepFailure)) throw error
+    failure = error.facts
+    failureMessage = error.message
+  }
+
+  const context =
+    flow === null ? null : await buildContext(pool, claimed, run, flow, timeouts)
+
+  // 2. Execute, outside any transaction.
+  const handler = deps.handlers[claimed.stepKind]
+
+  if (failure !== null) {
+    // The version could not be resolved. Nothing to execute.
+  } else if (context === null) {
+    // Unreachable: context is only null when the flow could not be resolved,
+    // and that sets failure above. Written out rather than asserted away so
+    // that if it ever does happen it is a recorded step failure and not a
+    // crash in the worker loop.
+    failure = { internal: true }
+    failureMessage = "no execution context"
+  } else if (handler === undefined) {
     failure = { deterministicallyBroken: true }
     failureMessage = `no handler registered for step kind ${JSON.stringify(claimed.stepKind)}`
   } else {
@@ -182,7 +243,10 @@ export async function runStep(
     state,
     {
       errorClass,
-      idempotent: nodeFor(deps.flow, claimed).idempotent,
+      // A step whose flow version is missing is treated as not repeatable.
+      // The safe default when we cannot read the node: assume the effect may
+      // already have happened.
+      idempotent: flow === null ? false : nodeFor(flow, claimed).idempotent,
       retryAfterMs: failure.retryAfterMs ?? null,
     },
     { now: Date.now(), random, policy: withStepLimits(policy, claimed) },
@@ -251,7 +315,7 @@ export async function runStep(
         runId: input.runId,
         runStartedAt: input.runStartedAt,
         stepExecutionId: input.stepId,
-        flowVersionId: deps.flow.versionId,
+        flowVersionId: run.flowVersionId,
         nodeId: claimed.nodeId,
         originTopic: 'run_step',
         reason: dlqReason,
@@ -265,7 +329,7 @@ export async function runStep(
           stepKind: claimed.stepKind,
           idempotencyKey: claimed.idempotencyKey,
           input: claimed.inputInline,
-          flowVersionId: deps.flow.versionId,
+          flowVersionId: run.flowVersionId,
         },
       })
       await enqueueAdvance(tx, input, claimed.tenantId)
@@ -299,6 +363,27 @@ function enqueueAdvance(
   })
 }
 
+/**
+ * The flow definition for a run, however this worker was configured.
+ *
+ * A worker given neither is a programming error, not a runtime condition, so
+ * it throws rather than failing the step: every step would fail identically
+ * and the DLQ would fill with the same misconfiguration.
+ */
+async function flowFor(deps: ExecutorDeps, run: RunRow): Promise<FlowDefinition> {
+  if (deps.flows !== undefined) {
+    const resolved = await deps.flows(run.flowVersionId)
+    if (resolved === null) {
+      throw new StepFailure(`flow version ${run.flowVersionId} is not available`, {
+        deterministicallyBroken: true,
+      })
+    }
+    return resolved
+  }
+  if (deps.flow !== undefined) return deps.flow
+  throw new Error('ExecutorDeps needs either flow or flows')
+}
+
 function nodeFor(flow: FlowDefinition, step: StepRow) {
   const node = flow.nodes.find((candidate) => candidate.id === step.nodeId)
   if (node === undefined) {
@@ -321,10 +406,10 @@ function withStepLimits(policy: BackoffPolicy, step: StepRow): BackoffPolicy {
 async function buildContext(
   pool: Pool,
   step: StepRow,
-  deps: ExecutorDeps,
+  run: RunRow,
+  flow: FlowDefinition,
   timeouts: TimeoutConfig,
 ): Promise<{ ctx: StepContext; dispose: () => void }> {
-  const run = await withTransaction(pool, (tx) => getRun(tx, step.runStartedAt, step.runId))
   const priorSteps = await withTransaction(pool, (tx) =>
     listSteps(tx, { id: step.runId, startedAt: step.runStartedAt }),
   )
@@ -344,9 +429,9 @@ async function buildContext(
 
   return {
     ctx: {
-      run: run!,
+      run,
       step,
-      node: nodeFor(deps.flow, step),
+      node: nodeFor(flow, step),
       idempotencyKey: step.idempotencyKey,
       upstream,
       signal: controller.signal,
