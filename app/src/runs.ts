@@ -36,6 +36,8 @@ export interface ViewerGraph {
 export interface ViewerRun {
   readonly id: string
   readonly startedAt: string
+  /** Absent while the run is still going. */
+  readonly finishedAt?: string
   readonly status: 'succeeded' | 'failed' | 'cancelled' | 'running'
   readonly graph: ViewerGraph
   readonly steps: readonly ViewerStep[]
@@ -120,6 +122,10 @@ export function toViewerRun(run: RunRow, steps: readonly StepRow[], graph: Viewe
   return {
     id: run.id,
     startedAt: run.startedAt.toISOString(),
+    // The viewer computes a run's duration from these two, and falls back to
+    // summing step durations without it — which is a different, smaller number.
+    // Sending it is what keeps the history list and the header agreeing.
+    ...(run.finishedAt === null ? {} : { finishedAt: run.finishedAt.toISOString() }),
     status: toViewerRunStatus(run.status),
     graph,
     steps: ordered.map((step) => {

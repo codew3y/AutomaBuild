@@ -118,6 +118,10 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
   registerWebhookRoute(app, {
     path: '/webhooks/:endpointId',
     gate,
+    // The gate writes its record before handing off, so a handoff that throws
+    // would leave the delivery recorded as seen and never acted on. Passing the
+    // store lets the route unwind that record and the retry be treated as new.
+    store,
     lookup: (endpointId) => (endpointId === config.endpointId ? endpoint : null),
 
     // The seam. Verified, de-duplicated, and now durable.
@@ -129,12 +133,13 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
           tenantId: config.tenantId,
           flow: compiled.flow,
           input: body,
-          // The gate's dedup key, reused as the engine's. Two layers of
-          // de-duplication keyed on the same thing is not redundant: the gate
-          // stops a replayed *request*, and this stops a second run when the
-          // gate's row was written and the process died before the run
-          // existed. Without it that window loses the delivery or duplicates
-          // it, depending on which way you resolve the race.
+          // The gate's dedup key, reused as the engine's. Two layers keyed on
+          // the same thing is not redundant, but not for the reason first
+          // written here: the gate releasing its record on a failed handoff is
+          // what stops the delivery being lost, and this is what stops the
+          // retry — or a replay arriving in the gap the release opens — from
+          // starting a second run. createRun on this key is idempotent, so the
+          // two together converge on exactly one run however the race lands.
           idempotencyKey: result.dedupKey,
         })
 

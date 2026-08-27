@@ -189,3 +189,39 @@ describe('a listing', () => {
     ])
   })
 })
+
+describe('the run duration the viewer will compute', () => {
+  test('a finished run carries its finish time', () => {
+    const view = toViewerRun(
+      run({ finishedAt: new Date('2026-03-01T09:00:05.000Z') }),
+      [step()],
+      graph,
+    )
+    assert.equal(view.finishedAt, '2026-03-01T09:00:05.000Z')
+  })
+
+  test('a running one carries no finish time rather than a null', () => {
+    const view = toViewerRun(run({ status: 'running', finishedAt: null }), [step()], graph)
+    assert.ok(!('finishedAt' in view), 'the viewer treats absent and null differently')
+  })
+
+  test('the listing agrees with what the viewer will compute from the run', () => {
+    // Both must mean wall clock. When they disagreed, the same run showed one
+    // number in the history list and a different one in the header.
+    const finished = run({
+      startedAt: new Date('2026-03-01T09:00:00.000Z'),
+      finishedAt: new Date('2026-03-01T09:00:05.000Z'),
+      stepCount: 1,
+      stepsSucceeded: 1,
+    })
+    const listing = toViewerListing(finished, 5000)
+    const view = toViewerRun(finished, [step({ durationMs: 120 })], graph)
+
+    assert.equal(listing.totalMs, 5000)
+    assert.equal(
+      Date.parse(view.finishedAt!) - Date.parse(view.startedAt),
+      listing.totalMs,
+      'the listing and the run must describe the same elapsed time',
+    )
+  })
+})
