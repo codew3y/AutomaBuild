@@ -68,6 +68,16 @@ export class PostgresReplayStore implements ReplayStore {
     }
   }
 
+  async release(endpointId: string, dedupKey: string): Promise<void> {
+    // Deleting a row that is not there is not an error: the caller is
+    // unwinding a failed handoff and cannot know whether its own record is
+    // still the one present.
+    await this.#pool.query(
+      `DELETE FROM webhook_deliveries WHERE endpoint_id = $1 AND dedup_key = $2`,
+      [endpointId, dedupKey],
+    )
+  }
+
   async prune(olderThan: Date): Promise<number> {
     const { rowCount } = await this.#pool.query(
       `DELETE FROM webhook_deliveries WHERE received_at < $1`,

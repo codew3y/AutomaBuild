@@ -59,6 +59,26 @@ export interface ReplayStore {
    */
   record(record: DeliveryRecord): Promise<RecordResult>
 
+  /**
+   * Forget a record, so the next copy of that delivery is treated as new.
+   *
+   * This exists for one situation, and it is not a hypothetical: `record` is
+   * called before the delivery is handed off, because the record is what stops
+   * two simultaneous copies both being accepted. If the handoff then fails —
+   * the database is down, the queue is unreachable — the record stands, the
+   * caller returns 500, and the sender's retry is answered "duplicate". The
+   * delivery is lost, silently and permanently.
+   *
+   * Releasing the record on a failed handoff turns that into a retry that
+   * works. It reopens a narrow window: a concurrent replay arriving between the
+   * failure and the release is treated as new. That is a far better trade than
+   * guaranteed loss, and a consumer whose handoff is itself idempotent — one
+   * keyed on the same dedup key — closes it completely.
+   *
+   * Releasing a key that is not there is not an error.
+   */
+  release(endpointId: string, dedupKey: string): Promise<void>
+
   /** Drop records older than the retention window. */
   prune(olderThan: Date): Promise<number>
 

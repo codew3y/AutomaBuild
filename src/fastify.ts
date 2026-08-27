@@ -19,6 +19,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { DEFAULT_MAX_BODY_BYTES } from './verify/common.ts'
 import type { EndpointConfig, GateResult, createGate } from './gate.ts'
+import type { ReplayStore } from './replay/store.ts'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -96,12 +97,34 @@ export interface WebhookRouteOptions {
   readonly gate: ReturnType<typeof createGate>
   /** Look up an endpoint's configuration, or null if there is no such endpoint. */
   readonly lookup: (endpointId: string) => Promise<EndpointConfig | null> | EndpointConfig | null
-  /** Called once for a genuinely new delivery. Errors here become a 500. */
+  /**
+   * Called once for a genuinely new delivery.
+   *
+   * An error here becomes a 500 *and* releases the replay record, so the
+   * sender's retry is treated as a new delivery rather than a duplicate. See
+   * `store` below for why that matters and what it costs.
+   */
   readonly onAccepted?: (
     endpoint: EndpointConfig,
     request: FastifyRequest,
     result: Extract<GateResult, { outcome: 'accepted' }>,
   ) => Promise<void> | void
+  /**
+   * The same store the gate was built with.
+   *
+   * Required whenever `onAccepted` is given, because the two together are what
+   * make a delivery survive a failed handoff. The record is written before the
+   * handoff — that is what stops two simultaneous copies both being accepted —
+   * so if the handoff throws, the record stands and the sender's retry is
+   * answered "duplicate". The delivery is then lost, silently and permanently,
+   * which is the worst outcome this library can produce.
+   *
+   * Releasing the record on failure trades that for a much smaller problem: a
+   * concurrent replay arriving between the failure and the release is treated
+   * as new. A consumer whose handoff is idempotent on the same dedup key — as
+   * a durable run keyed on it is — closes even that.
+   */
+  readonly store?: ReplayStore
 }
 
 /**
@@ -150,7 +173,31 @@ export function registerWebhookRoute(
     }
 
     if (options.onAccepted !== undefined) {
-      await options.onAccepted(endpoint, request, result)
+      try {
+        await options.onAccepted(endpoint, request, result)
+      } catch (error) {
+        // Unwind the record before the 500 goes out. Without this the sender
+        // retries, the gate answers "duplicate", and the delivery is gone.
+        if (options.store !== undefined) {
+          try {
+            await options.store.release(endpoint.endpointId, result.dedupKey)
+          } catch (releaseError) {
+            // A release that fails is the lost-delivery case again, and it is
+            // worth saying so explicitly: this is the line to look for when a
+            // delivery goes missing.
+            request.log.error(
+              { endpointId: endpoint.endpointId, dedupKey: result.dedupKey, err: releaseError },
+              'could not release the replay record; this delivery will be treated as a duplicate on retry and lost',
+            )
+          }
+        } else {
+          request.log.error(
+            { endpointId: endpoint.endpointId, dedupKey: result.dedupKey },
+            'handoff failed and no store was given to registerWebhookRoute, so the retry will be treated as a duplicate and the delivery lost',
+          )
+        }
+        throw error
+      }
     }
     return reply.code(200).send({ ok: true, duplicate: false })
   })
