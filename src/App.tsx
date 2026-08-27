@@ -562,6 +562,21 @@ function Editor() {
       .then((data: { versionId: string; graph: FlowGraph } | null) => {
         if (cancelled || data === null || !Array.isArray(data.graph?.nodes)) return
         setPublished({ versionId: data.versionId, graph: data.graph })
+
+        // Open on what is live, unless there is unsaved local work.
+        //
+        // The editor used to open on its localStorage draft or, failing that,
+        // the bundled sample — never on the published flow. So the canvas and
+        // the server could show entirely different flows with nothing saying
+        // so, and someone editing a step that was not in the live version had
+        // no way to notice. A local draft still wins, because it is unsaved
+        // work and losing it silently would be worse; the divergence indicator
+        // and Discard are what surface the difference in that case.
+        if (localStorage.getItem(DRAFT_KEY) === null) {
+          graphStore.getState().replaceGraph(data.graph)
+          graphStore.temporal.getState().clear()
+          autosave.reset(data.graph)
+        }
       })
       .catch((error: unknown) => {
         if (error instanceof UnauthorizedError) setNeedsKey(true)
@@ -1128,7 +1143,23 @@ function Editor() {
 
       {restored && !viewing && (
         <div className="restored" role="status">
-          <span>Draft restored from your last session.</span>
+          <span>
+            Draft restored from your last session
+            {published !== null && diverged
+              ? ' — it differs from the published flow.'
+              : '.'}
+          </span>
+          {published !== null && diverged && (
+            <button
+              onClick={() => {
+                discard()
+                setRestored(false)
+              }}
+              title="Replace this draft with the flow the server is running"
+            >
+              Load published
+            </button>
+          )}
           <button
             className="dismiss"
             aria-label="Dismiss"
