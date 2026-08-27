@@ -34,12 +34,14 @@ jobs:
 
       - run: docker compose up -d --build
 
+      # `if` rather than assigning the result of a command substitution: the
+      # step runs under `bash -e`, where a failing substitution aborts the
+      # script, so a database that is merely not ready yet ends the job on the
+      # first attempt instead of being waited for.
       - name: wait for both databases
         run: |
           for _ in $(seq 1 90); do
-            runner=$(docker compose exec -T runner-db pg_isready -U automa -d automa >/dev/null 2>&1 && echo ok)
-            gate=$(docker compose exec -T gate-db pg_isready -U webhookgate -d webhookgate >/dev/null 2>&1 && echo ok)
-            if [ "$runner" = ok ] && [ "$gate" = ok ]; then
+            if docker compose exec -T runner-db pg_isready -U automa -d automa >/dev/null 2>&1                && docker compose exec -T gate-db pg_isready -U webhookgate -d webhookgate >/dev/null 2>&1; then
               echo ready
               exit 0
             fi
