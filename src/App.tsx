@@ -35,28 +35,30 @@ import '@xyflow/react/dist/style.css'
 import { useStore } from 'zustand'
 import { createGraphStore } from './store/graph-store.ts'
 import { createEditorStore } from './store/editor-store.ts'
-import { canConnect, type FlowGraph } from './core/graph.ts'
+import { ancestors, canConnect, type FlowGraph } from './core/graph.ts'
 import { canPublish, issuesByNode, validate, type ValidationIssue } from './core/validation.ts'
 import { createAutosave, type SaveState } from './core/patch.ts'
-import { nodeTypes } from './components/StepNode.tsx'
-import { SAMPLE_FLOW, STEP_KINDS, SCHEMAS } from './sample.ts'
+import { outputTree, referenceFor, resolveTemplate } from './core/resolve.ts'
+import { buildRunView, summarise } from './core/run.ts'
+import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
+import { SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
 
 const graphStore = createGraphStore({ initial: SAMPLE_FLOW })
 const editorStore = createEditorStore()
 
-/** Where a saved draft lives between refreshes. */
 const DRAFT_KEY = 'automa-flow-canvas:draft'
 
 function Editor() {
   const nodes = useStore(graphStore, (state) => state.nodes)
   const edges = useStore(graphStore, (state) => state.edges)
   const selectedNodeId = useStore(editorStore, (state) => state.selectedNodeId)
+  const panelTab = useStore(editorStore, (state) => state.panelTab)
+  const mode = useStore(editorStore, (state) => state.mode)
 
   const [saveState, setSaveState] = useState<SaveState>('saved')
   const [restored, setRestored] = useState(false)
 
-  // Undo depth, read narrowly so the toolbar re-renders without the canvas.
   const canUndo = useStore(graphStore.temporal, (state) => state.pastStates.length > 0)
   const canRedo = useStore(graphStore.temporal, (state) => state.futureStates.length > 0)
 
@@ -68,12 +70,13 @@ function Editor() {
   const byNode = useMemo(() => issuesByNode(issues), [issues])
   const publishable = useMemo(() => canPublish(issues), [issues])
 
+  const runView = useMemo(() => buildRunView(SAMPLE_RUN), [])
+  const runSummary = useMemo(() => summarise(SAMPLE_RUN), [])
+  const viewing = mode === 'run'
+
   const autosave = useRef(
     createAutosave({
-      // A mock backend, per the brief. localStorage is honest about being one:
-      // it survives a refresh, which is the property the exit criterion cares
-      // about, and nobody will mistake it for a server.
-      save: async (_ops, _base) => {
+      save: async () => {
         await new Promise((resolve) => setTimeout(resolve, 180))
         localStorage.setItem(DRAFT_KEY, JSON.stringify(graphStore.getState().snapshot()))
       },
@@ -81,7 +84,6 @@ function Editor() {
     }),
   ).current
 
-  // Restore a draft once, before anything else can schedule a save.
   useEffect(() => {
     const saved = localStorage.getItem(DRAFT_KEY)
     if (saved !== null) {
@@ -100,12 +102,9 @@ function Editor() {
   }, [autosave])
 
   useEffect(() => {
-    autosave.schedule(graph)
-  }, [graph, autosave])
+    if (!viewing) autosave.schedule(graph)
+  }, [graph, autosave, viewing])
 
-  // Blur and tab-hide flush immediately. A debounce alone loses the last edit
-  // when someone closes the tab within 800 ms of making it — which is exactly
-  // when people close tabs.
   useEffect(() => {
     const flush = () => {
       void autosave.flush().catch(() => {})
@@ -121,8 +120,32 @@ function Editor() {
     }
   }, [autosave])
 
+  const deleteSelected = useCallback(() => {
+    const id = editorStore.getState().selectedNodeId
+    if (id === null) return
+    graphStore.getState().removeNode(id)
+    editorStore.getState().select(null)
+  }, [])
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      const typing =
+        target !== null &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+
+      // Delete and Backspace remove the selected step — but never while a
+      // field has focus, or backspacing a typo would delete the node.
+      if (!typing && (event.key === 'Delete' || event.key === 'Backspace')) {
+        if (editorStore.getState().selectedNodeId !== null) {
+          event.preventDefault()
+          deleteSelected()
+        }
+        return
+      }
+
       if (!(event.metaKey || event.ctrlKey)) return
       if (event.key === 'z' && !event.shiftKey) {
         event.preventDefault()
@@ -134,102 +157,119 @@ function Editor() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [deleteSelected])
 
   /* ------------------------------------------------ store → React Flow */
 
-  const rfNodes = useMemo<Node[]>(
-    () =>
-      nodes.map((node) => ({
+  const rfNodes = useMemo<Node[]>(() => {
+    const source = viewing ? SAMPLE_RUN.graph.nodes : nodes
+    return source.map((node) => {
+      const run = viewing ? runView.byNode.get(node.id) : undefined
+      return {
         id: node.id,
         type: 'step',
         position: node.position,
         selected: node.id === selectedNodeId,
-        // A new data object each time the issue set changes, so memoised nodes
-        // re-render exactly when their own badge changes and not otherwise.
+        deletable: !viewing,
+        draggable: !viewing,
         data: {
           ...node.data,
           kind: node.kind,
-          issueCount: byNode.get(node.id)?.length ?? 0,
-          hasError: (byNode.get(node.id) ?? []).some((issue) => issue.severity === 'error'),
+          issueCount: viewing ? 0 : (byNode.get(node.id)?.length ?? 0),
+          hasError: viewing
+            ? false
+            : (byNode.get(node.id) ?? []).some((issue) => issue.severity === 'error'),
+          outcome: run?.outcome,
+          durationMs: run?.durationMs,
         },
-      })),
-    [nodes, selectedNodeId, byNode],
-  )
+      }
+    })
+  }, [nodes, selectedNodeId, byNode, viewing, runView])
 
-  const rfEdges = useMemo<Edge[]>(
-    () =>
-      edges.map((edge) => ({
+  const rfEdges = useMemo<Edge[]>(() => {
+    const source = viewing ? SAMPLE_RUN.graph.edges : edges
+    return source.map((edge) => {
+      const taken = viewing ? runView.takenEdgeIds.has(edge.id) : true
+      return {
         id: edge.id,
         source: edge.source,
         target: edge.target,
         ...(edge.sourceHandle === undefined ? {} : { sourceHandle: edge.sourceHandle }),
         ...(edge.targetHandle === undefined ? {} : { targetHandle: edge.targetHandle }),
         label: edge.sourceHandle,
-        animated: false,
-      })),
-    [edges],
-  )
+        animated: viewing && taken,
+        deletable: !viewing,
+        // The untaken branch is dimmed rather than hidden. Hiding it would
+        // remove the very thing the viewer is meant to explain: that there was
+        // another path and this run did not take it.
+        style: viewing && !taken ? { opacity: 0.22, strokeDasharray: '4 4' } : undefined,
+      }
+    })
+  }, [edges, viewing, runView])
 
   /* ------------------------------------------------ React Flow → store */
 
-  const onNodesChange = useCallback((changes: NodeChange[]) => {
-    const state = graphStore.getState()
-    for (const change of changes) {
-      if (change.type === 'position' && change.position !== undefined) {
-        state.moveNode(change.id, change.position)
-      } else if (change.type === 'remove') {
-        state.removeNode(change.id)
-      } else if (change.type === 'select') {
-        editorStore.getState().select(change.selected ? change.id : null)
+  const onNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      if (viewing) {
+        for (const change of changes) {
+          if (change.type === 'select') {
+            editorStore.getState().select(change.selected ? change.id : null)
+          }
+        }
+        return
       }
-    }
-  }, [])
+      const state = graphStore.getState()
+      for (const change of changes) {
+        if (change.type === 'position' && change.position !== undefined) {
+          state.moveNode(change.id, change.position)
+        } else if (change.type === 'remove') {
+          state.removeNode(change.id)
+          if (editorStore.getState().selectedNodeId === change.id) {
+            editorStore.getState().select(null)
+          }
+        } else if (change.type === 'select') {
+          editorStore.getState().select(change.selected ? change.id : null)
+        }
+      }
+    },
+    [viewing],
+  )
 
-  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
-    for (const change of changes) {
-      if (change.type === 'remove') graphStore.getState().removeEdge(change.id)
-    }
-  }, [])
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      if (viewing) return
+      for (const change of changes) {
+        if (change.type === 'remove') graphStore.getState().removeEdge(change.id)
+      }
+    },
+    [viewing],
+  )
 
-  /**
-   * Refuse invalid connections *during* the drag.
-   *
-   * React Flow calls this continuously while the pointer moves, and a `false`
-   * makes the target handle refuse the drop rather than accepting it and
-   * reporting a problem afterwards. That difference is the whole exit
-   * criterion: the graph never enters an invalid state.
-   */
-  const isValidConnection = useCallback<IsValidConnection>((connection) => {
-    if (connection.source === null || connection.target === null) return false
-    return canConnect(graphStore.getState().snapshot(), {
-      source: connection.source,
-      target: connection.target,
-      ...(connection.sourceHandle === null || connection.sourceHandle === undefined
-        ? {}
-        : { sourceHandle: connection.sourceHandle }),
-      ...(connection.targetHandle === null || connection.targetHandle === undefined
-        ? {}
-        : { targetHandle: connection.targetHandle }),
-    }).valid
-  }, [])
+  const isValidConnection = useCallback<IsValidConnection>(
+    (connection) => {
+      if (viewing) return false
+      if (connection.source === null || connection.target === null) return false
+      return canConnect(graphStore.getState().snapshot(), {
+        source: connection.source,
+        target: connection.target,
+        ...(connection.sourceHandle == null ? {} : { sourceHandle: connection.sourceHandle }),
+        ...(connection.targetHandle == null ? {} : { targetHandle: connection.targetHandle }),
+      }).valid
+    },
+    [viewing],
+  )
 
   const onConnect = useCallback((connection: Connection) => {
     if (connection.source === null || connection.target === null) return
     graphStore.getState().connect({
       source: connection.source,
       target: connection.target,
-      ...(connection.sourceHandle === null || connection.sourceHandle === undefined
-        ? {}
-        : { sourceHandle: connection.sourceHandle }),
-      ...(connection.targetHandle === null || connection.targetHandle === undefined
-        ? {}
-        : { targetHandle: connection.targetHandle }),
+      ...(connection.sourceHandle == null ? {} : { sourceHandle: connection.sourceHandle }),
+      ...(connection.targetHandle == null ? {} : { targetHandle: connection.targetHandle }),
     })
   }, [])
 
-  // Pointer-up closes the coalescing window, so the next drag is its own undo
-  // entry rather than being merged into this one.
   const onNodeDragStop = useCallback(() => {
     graphStore.endGesture()
   }, [])
@@ -245,6 +285,14 @@ function Editor() {
     editorStore.getState().select(id)
   }, [])
 
+  // MiniMap draws its own rectangles and cannot see the node's CSS, so without
+  // an explicit colour every node renders in the default grey and the map is
+  // an unreadable smear.
+  const miniMapNodeColor = useCallback(
+    (node: Node) => KIND_ACCENT[String(node.data?.kind ?? '')] ?? '#94a3b8',
+    [],
+  )
+
   const selected = useMemo(
     () => nodes.find((node) => node.id === selectedNodeId) ?? null,
     [nodes, selectedNodeId],
@@ -253,39 +301,85 @@ function Editor() {
   return (
     <div className="editor">
       <header className="toolbar">
-        <strong>automa-flow-canvas</strong>
+        <strong className="brand">Automabuild</strong>
 
-        <div className="palette">
-          {STEP_KINDS.map((kind) => (
-            <button key={kind} onClick={() => addStep(kind)} title={`Add a ${kind} step`}>
-              + {kind}
-            </button>
-          ))}
+        <div className="modes">
+          <button
+            className={mode === 'edit' ? 'mode active' : 'mode'}
+            onClick={() => editorStore.getState().setMode('edit')}
+          >
+            Edit
+          </button>
+          <button
+            className={mode === 'run' ? 'mode active' : 'mode'}
+            onClick={() => editorStore.getState().setMode('run')}
+            title="View a past execution"
+          >
+            Run viewer
+          </button>
         </div>
+
+        {!viewing && (
+          <div className="palette">
+            {STEP_KINDS.map((kind) => (
+              <button key={kind} onClick={() => addStep(kind)} title={`Add a ${kind} step`}>
+                + {kind}
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="spacer" />
 
-        <button onClick={() => graphStore.temporal.getState().undo()} disabled={!canUndo}>
-          Undo
-        </button>
-        <button onClick={() => graphStore.temporal.getState().redo()} disabled={!canRedo}>
-          Redo
-        </button>
+        {!viewing && (
+          <>
+            <button
+              onClick={deleteSelected}
+              disabled={selectedNodeId === null}
+              title={selectedNodeId === null ? 'Select a step first' : 'Delete the selected step'}
+            >
+              Delete
+            </button>
+            <button onClick={() => graphStore.temporal.getState().undo()} disabled={!canUndo}>
+              Undo
+            </button>
+            <button onClick={() => graphStore.temporal.getState().redo()} disabled={!canRedo}>
+              Redo
+            </button>
 
-        <span className={`save save-${saveState}`}>
-          {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : 'Unsaved'}
-        </span>
+            <span className={`save save-${saveState}`}>
+              {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : 'Unsaved'}
+            </span>
 
-        <button className="publish" disabled={!publishable} title={
-          publishable ? 'Publish this version' : 'Fix the errors below first'
-        }>
-          Publish
-        </button>
+            <button
+              className="publish"
+              disabled={!publishable}
+              title={publishable ? 'Publish this version' : 'Fix the errors listed first'}
+            >
+              Publish
+            </button>
+          </>
+        )}
+
+        {viewing && (
+          <span className="run-summary">
+            {SAMPLE_RUN.id} · {runSummary.succeeded} ok · {runSummary.notReached} not reached ·{' '}
+            {runSummary.totalMs} ms
+          </span>
+        )}
       </header>
 
-      {restored && (
+      {restored && !viewing && (
         <div className="restored" role="status">
-          Draft restored from your last session.
+          <span>Draft restored from your last session.</span>
+          <button
+            className="dismiss"
+            aria-label="Dismiss"
+            title="Dismiss"
+            onClick={() => setRestored(false)}
+          >
+            ✕
+          </button>
         </div>
       )}
 
@@ -300,57 +394,79 @@ function Editor() {
           onNodeDragStop={onNodeDragStop}
           isValidConnection={isValidConnection}
           onPaneClick={() => editorStore.getState().select(null)}
+          deleteKeyCode={null}
+          nodesDraggable={!viewing}
+          nodesConnectable={!viewing}
+          elementsSelectable
           fitView
-          proOptions={{ hideAttribution: false }}
         >
           <Background gap={16} />
-          <Controls />
-          <MiniMap pannable zoomable />
+          <Controls showInteractive={false} />
+          <MiniMap pannable zoomable nodeColor={miniMapNodeColor} nodeStrokeWidth={2} />
         </ReactFlow>
 
         <aside className="panel">
-          <Inspector selectedId={selected?.id ?? null} issues={issues} />
+          {viewing ? (
+            <RunPanel selectedId={selectedNodeId} />
+          ) : (
+            <EditPanel
+              selected={selected}
+              issues={issues}
+              tab={panelTab}
+              onDelete={deleteSelected}
+            />
+          )}
         </aside>
       </div>
     </div>
   )
 }
 
-/**
- * The inspector reads only what it needs.
- *
- * It takes the selected id rather than the node, and pulls that one node from
- * the store itself — so typing in a field re-renders this panel and nothing
- * else. Passing the whole node array down would re-render it on every drag of
- * every other node.
- */
-function Inspector({
-  selectedId,
-  issues,
-}: {
-  selectedId: string | null
-  issues: readonly ValidationIssue[]
-}) {
-  const node = useStore(
-    graphStore,
-    useCallback(
-      (state: { nodes: readonly { id: string }[] }) =>
-        selectedId === null ? null : state.nodes.find((n) => n.id === selectedId) ?? null,
-      [selectedId],
-    ),
-  ) as { id: string; kind: string; data: Record<string, unknown> } | null
+/* ------------------------------------------------------------ edit panel */
 
+function EditPanel({
+  selected,
+  issues,
+  tab,
+  onDelete,
+}: {
+  selected: { id: string; kind: string; data: Record<string, unknown> } | null
+  issues: readonly ValidationIssue[]
+  tab: 'setup' | 'mapping'
+  onDelete: () => void
+}) {
   const errors = issues.filter((issue) => issue.severity === 'error')
   const warnings = issues.filter((issue) => issue.severity === 'warning')
 
   return (
     <>
+      <div className="tabs">
+        <button
+          className={tab === 'setup' ? 'active' : ''}
+          onClick={() => editorStore.getState().setPanelTab('setup')}
+        >
+          Setup
+        </button>
+        <button
+          className={tab === 'mapping' ? 'active' : ''}
+          onClick={() => editorStore.getState().setPanelTab('mapping')}
+        >
+          Mapping
+        </button>
+      </div>
+
       <section className="panel-section">
-        <h2>Step</h2>
-        {node === null ? (
+        {selected === null ? (
           <p className="muted">Select a step to configure it.</p>
+        ) : tab === 'setup' ? (
+          <>
+            <StepForm key={selected.id} nodeId={selected.id} kind={selected.kind} data={selected.data} />
+            <button className="danger" onClick={onDelete}>
+              Delete this step
+            </button>
+          </>
         ) : (
-          <StepForm key={node.id} nodeId={node.id} kind={node.kind} data={node.data} />
+          <MappingPanel nodeId={selected.id} kind={selected.kind} data={selected.data} />
         )}
       </section>
 
@@ -379,12 +495,184 @@ function Inspector({
 }
 
 /**
- * Fields commit on blur, not on keystroke.
+ * The mapping panel.
  *
- * Committing per keystroke would put every character in the undo stack, so
- * ctrl-Z would delete one letter at a time — and would fire an autosave patch
- * per character. The local value is component state until the field is left.
+ * Two halves. The tree shows what earlier steps produced; clicking a leaf
+ * inserts a reference into the field being edited. The preview shows what that
+ * reference resolves to — which is the half that earns the panel, because
+ * `{{ steps.fetch.output.email }}` tells you what you typed and
+ * `sam@example.com` tells you whether it is right.
+ *
+ * Only *ancestors* are offered. Listing every step would invite exactly the
+ * mapping the validation then rejects, which is a poor way to learn a rule.
  */
+function MappingPanel({
+  nodeId,
+  kind,
+  data,
+}: {
+  nodeId: string
+  kind: string
+  data: Record<string, unknown>
+}) {
+  const nodes = useStore(graphStore, (state) => state.nodes)
+  const edges = useStore(graphStore, (state) => state.edges)
+  const fields = SCHEMAS[kind]?.fields ?? []
+  const [activeField, setActiveField] = useState(fields[0] ?? '')
+
+  const available = useMemo(() => {
+    const upstream = ancestors({ nodes, edges }, nodeId)
+    const outputs: Record<string, unknown> = {}
+    for (const id of upstream) {
+      if (SAMPLE_OUTPUTS[id] !== undefined) outputs[id] = SAMPLE_OUTPUTS[id]
+    }
+    return outputs
+  }, [nodes, edges, nodeId])
+
+  const leaves = useMemo(() => outputTree(available), [available])
+  const currentValue = String(data[activeField] ?? '')
+  const preview = useMemo(
+    () => resolveTemplate(currentValue, available),
+    [currentValue, available],
+  )
+
+  const insert = useCallback(
+    (path: string) => {
+      if (activeField === '') return
+      const next = `${currentValue}${currentValue.length > 0 ? ' ' : ''}${referenceFor(path)}`
+      graphStore.getState().updateNodeData(nodeId, { [activeField]: next })
+      graphStore.endGesture()
+    },
+    [activeField, currentValue, nodeId],
+  )
+
+  if (fields.length === 0) {
+    return <p className="muted">This step has no fields to map into.</p>
+  }
+
+  return (
+    <>
+      <h2>Mapping</h2>
+
+      <label className="field">
+        <span>field</span>
+        <select value={activeField} onChange={(event) => setActiveField(event.target.value)}>
+          {fields.map((field) => (
+            <option key={field} value={field}>
+              {field}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <div className="preview">
+        <span className="preview-label">preview</span>
+        {currentValue === '' ? (
+          <em className="muted">empty</em>
+        ) : preview.missing.length > 0 ? (
+          <span className="preview-missing" title={`Unresolved: ${preview.missing.join(', ')}`}>
+            {preview.text}
+          </span>
+        ) : (
+          <span className="preview-value">
+            {preview.single && typeof preview.value !== 'string'
+              ? JSON.stringify(preview.value)
+              : preview.text}
+          </span>
+        )}
+      </div>
+
+      <h2 className="tree-heading">Available from earlier steps</h2>
+      {leaves.length === 0 ? (
+        <p className="muted">
+          Nothing runs before this step yet. Connect it to something upstream first.
+        </p>
+      ) : (
+        <ul className="tree">
+          {leaves.map((leaf) => (
+            <li key={leaf.path} style={{ paddingLeft: `${(leaf.depth - 1) * 0.7}rem` }}>
+              <button
+                className="pill"
+                onClick={() => insert(leaf.path)}
+                disabled={leaf.kind === 'object' || leaf.kind === 'array'}
+                title={
+                  leaf.kind === 'object' || leaf.kind === 'array'
+                    ? 'Pick a field inside this'
+                    : `Insert ${referenceFor(leaf.path)}`
+                }
+              >
+                <span className="pill-key">{leaf.key}</span>
+                <span className={`pill-kind kind-${leaf.kind}`}>{leaf.kind}</span>
+                {leaf.kind !== 'object' && leaf.kind !== 'array' && (
+                  <span className="pill-value">{String(leaf.value)}</span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </>
+  )
+}
+
+/* ------------------------------------------------------------- run panel */
+
+function RunPanel({ selectedId }: { selectedId: string | null }) {
+  const step = SAMPLE_RUN.steps.find((candidate) => candidate.nodeId === selectedId) ?? null
+
+  return (
+    <>
+      <section className="panel-section">
+        <h2>Run {SAMPLE_RUN.id}</h2>
+        <p className="muted">
+          {new Date(SAMPLE_RUN.startedAt).toLocaleString()} · {SAMPLE_RUN.status}
+        </p>
+        <p className="muted">
+          This is a past execution, rendered on the graph <em>as it was</em> when it ran. The
+          dimmed edge is the branch this run did not take.
+        </p>
+      </section>
+
+      <section className="panel-section">
+        <h2>Step</h2>
+        {step === null ? (
+          <p className="muted">Select a step to see what went in and what came out.</p>
+        ) : (
+          <>
+            <p className="muted">
+              <code>{step.nodeId}</code> ·{' '}
+              <span className={`outcome outcome-${step.outcome}`}>{step.outcome}</span>
+              {step.durationMs !== undefined && ` · ${step.durationMs} ms`}
+              {step.attempts !== undefined && step.attempts > 1 && ` · ${step.attempts} attempts`}
+            </p>
+
+            {step.outcome === 'not_reached' && (
+              <p className="muted">
+                Never ran. The branch went the other way — nothing failed here.
+              </p>
+            )}
+
+            {step.input !== undefined && (
+              <>
+                <h3>Input</h3>
+                <pre>{JSON.stringify(step.input, null, 2)}</pre>
+              </>
+            )}
+            {step.output !== undefined && (
+              <>
+                <h3>Output</h3>
+                <pre>{JSON.stringify(step.output, null, 2)}</pre>
+              </>
+            )}
+          </>
+        )}
+      </section>
+    </>
+  )
+}
+
+/* ----------------------------------------------------------------- form */
+
 function StepForm({
   nodeId,
   kind,
@@ -417,6 +705,12 @@ function StepForm({
   )
 }
 
+/**
+ * Commits on blur, not on keystroke.
+ *
+ * Per-keystroke would put every character in the undo stack, so ctrl-Z would
+ * delete one letter at a time, and would fire an autosave patch per character.
+ */
 function Field({
   label,
   value,

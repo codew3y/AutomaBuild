@@ -169,3 +169,167 @@ button.publish:disabled { border-color: var(--line); color: var(--muted); }
 /* React Flow paints handles small by default; a webhook editor is a
    drag-heavy interface and a 6px target is genuinely hard to hit. */
 .react-flow__handle { width: 9px; height: 9px; }
+
+/* ------------------------------------------------ React Flow chrome fixes */
+
+/* The Controls buttons ship with a light-grey SVG that is invisible against a
+   white panel — and completely invisible in dark mode, where the panel is
+   white and the icon stays grey. Both colours are set explicitly rather than
+   inherited, because the library paints the fill on the path. */
+.react-flow__controls {
+  box-shadow: 0 1px 4px rgb(0 0 0 / .18);
+  border-radius: .4rem;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  width: 26px;
+  height: 26px;
+}
+.react-flow__controls-button:hover { background: var(--panel); }
+.react-flow__controls-button svg { fill: var(--fg); }
+.react-flow__controls-button:disabled svg { fill: var(--muted); opacity: .5; }
+
+/* The minimap draws its own rectangles; node colour is passed in from the
+   component. The mask needs to work on both themes. */
+.react-flow__minimap {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: .4rem;
+}
+.react-flow__minimap-mask { fill: color-mix(in srgb, var(--fg) 12%, transparent); }
+
+.react-flow__attribution { font-size: .65rem; opacity: .5; }
+
+/* ------------------------------------------------------------- toolbar */
+
+.brand { font-size: .95rem; letter-spacing: -.01em; }
+
+.modes { display: flex; gap: .2rem; margin-left: .4rem; }
+.modes .mode { font-size: .8rem; }
+.modes .mode.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+.run-summary { font-size: .8rem; color: var(--muted); font-family: ui-monospace, monospace; }
+
+.restored { display: flex; align-items: center; gap: .6rem; }
+.restored span { flex: 1; }
+.restored .dismiss {
+  border: none;
+  background: transparent;
+  padding: .1rem .4rem;
+  font-size: .9rem;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+.restored .dismiss:hover { color: var(--fg); }
+
+button.danger { border-color: var(--error); color: var(--error); margin-top: .5rem; width: 100%; }
+
+/* ---------------------------------------------------------------- tabs */
+
+.tabs { display: flex; border-bottom: 1px solid var(--line); }
+.tabs button {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  padding: .5rem;
+  font-size: .82rem;
+  color: var(--muted);
+}
+.tabs button.active { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* ------------------------------------------------------------- mapping */
+
+.field select {
+  font: inherit;
+  font-size: .85rem;
+  padding: .35rem .5rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  padding: .5rem .6rem;
+  margin: .5rem 0 .9rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--bg);
+  font-family: ui-monospace, monospace;
+  font-size: .8rem;
+  word-break: break-word;
+}
+.preview-label { font-family: inherit; font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.preview-value { color: var(--ok); }
+/* An unresolved reference is a warning, not a value. Rendering it as ordinary
+   text would let a mapping that resolves to nothing look like it worked. */
+.preview-missing { color: var(--warn); }
+
+.tree-heading { margin-top: 1rem; }
+.tree { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .15rem; }
+
+.pill {
+  display: flex;
+  align-items: baseline;
+  gap: .4rem;
+  width: 100%;
+  text-align: left;
+  font-size: .78rem;
+  padding: .22rem .45rem;
+}
+.pill:disabled { opacity: .6; cursor: default; }
+.pill-key { font-family: ui-monospace, monospace; }
+.pill-kind { font-size: .66rem; color: var(--muted); }
+.pill-value {
+  margin-left: auto;
+  font-family: ui-monospace, monospace;
+  color: var(--muted);
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ----------------------------------------------------------- run viewer */
+
+.step-outcome {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  font-size: .78rem;
+  font-weight: 700;
+}
+.step-ms { font-weight: 400; font-size: .68rem; color: var(--muted); }
+
+.outcome-succeeded { color: var(--ok); }
+.outcome-failed { color: var(--error); }
+.outcome-not_reached { color: var(--muted); }
+.outcome-running { color: var(--accent); }
+
+/* A step the run never reached is dimmed rather than hidden, because "it did
+   not run" is the answer the viewer usually exists to give. */
+.step-node[data-outcome='not_reached'] { opacity: .45; border-style: dashed; }
+.step-node[data-outcome='failed'] { border-color: var(--error); }
+
+.panel-section h3 { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: .8rem 0 .3rem; }
+.panel-section pre {
+  margin: 0;
+  padding: .5rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--bg);
+  font-size: .74rem;
+  overflow-x: auto;
+}
+
+.outcome { font-weight: 600; }

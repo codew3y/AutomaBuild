@@ -19,18 +19,23 @@ export interface Viewport {
   readonly zoom: number
 }
 
-export type PanelTab = 'setup' | 'mapping' | 'test' | 'settings'
+export type PanelTab = 'setup' | 'mapping'
+
+/** Editing the flow, or looking at an execution that already happened. */
+export type Mode = 'edit' | 'run'
 
 export interface EditorState {
   readonly selectedNodeId: string | null
   readonly viewport: Viewport
   readonly panelTab: PanelTab
   readonly paletteOpen: boolean
+  readonly mode: Mode
 
   select(nodeId: string | null): void
   setViewport(viewport: Viewport): void
   setPanelTab(tab: PanelTab): void
   togglePalette(): void
+  setMode(mode: Mode): void
 }
 
 export const createEditorStore = () =>
@@ -39,6 +44,7 @@ export const createEditorStore = () =>
     viewport: { x: 0, y: 0, zoom: 1 },
     panelTab: 'setup',
     paletteOpen: true,
+    mode: 'edit',
 
     select(nodeId) {
       set({ selectedNodeId: nodeId })
@@ -51,6 +57,12 @@ export const createEditorStore = () =>
     },
     togglePalette() {
       set((state) => ({ paletteOpen: !state.paletteOpen }))
+    },
+    setMode(mode) {
+      // Selection is cleared when switching, because the two modes select
+      // different things — a step you are configuring, versus a step whose
+      // result you are reading — and carrying one over shows the wrong panel.
+      set({ mode, selectedNodeId: null })
     },
   }))
 

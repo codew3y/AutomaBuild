@@ -23,6 +23,18 @@ export interface StepNodeData extends Record<string, unknown> {
   /** Validation problems attached to this node, for the outline and the badge. */
   readonly issueCount?: number
   readonly hasError?: boolean
+  /** Set only in the run viewer. */
+  readonly outcome?: string
+  readonly durationMs?: number
+}
+
+/** Exported so the MiniMap can colour its rectangles; it cannot see the CSS. */
+export const KIND_ACCENT: Record<string, string> = {
+  trigger: '#7c3aed',
+  http: '#0ea5e9',
+  transform: '#f59e0b',
+  branch: '#10b981',
+  email: '#ec4899',
 }
 
 const KIND_STYLE: Record<string, { accent: string; glyph: string }> = {
@@ -44,6 +56,7 @@ function StepNodeComponent({ data, selected, id }: NodeProps) {
       className="step-node"
       data-selected={selected ? 'true' : undefined}
       data-error={stepData.hasError ? 'true' : undefined}
+      data-outcome={stepData.outcome}
       style={{ '--accent': style.accent } as React.CSSProperties}
     >
       {/* A trigger has no input: nothing runs before it, so offering a target
@@ -57,6 +70,21 @@ function StepNodeComponent({ data, selected, id }: NodeProps) {
         <span className="step-label">{stepData.label ?? id}</span>
         <span className="step-kind">{stepData.kind}</span>
       </span>
+
+      {stepData.outcome !== undefined && (
+        <span className={`step-outcome outcome-${stepData.outcome}`}>
+          {stepData.outcome === 'succeeded'
+            ? '✓'
+            : stepData.outcome === 'failed'
+              ? '✕'
+              : stepData.outcome === 'not_reached'
+                ? '–'
+                : '…'}
+          {stepData.durationMs !== undefined && (
+            <span className="step-ms">{stepData.durationMs}ms</span>
+          )}
+        </span>
+      )}
 
       {stepData.issueCount !== undefined && stepData.issueCount > 0 && (
         <span
