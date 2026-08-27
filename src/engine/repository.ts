@@ -643,6 +643,35 @@ export async function recordFailure(
   return (rowCount ?? 0) > 0
 }
 
+/**
+ * Mark steps as skipped, because a branch went the other way.
+ *
+ * Only `pending` rows are touched. A step that has already run, or is running
+ * right now, is not something a later decision may retroactively erase — and
+ * in a resumed run the earlier arm may genuinely have executed before the
+ * process died.
+ */
+export async function markSkipped(
+  tx: Executor,
+  run: { id: string; startedAt: Date },
+  nodeIds: readonly string[],
+  reason: string,
+): Promise<number> {
+  if (nodeIds.length === 0) return 0
+  const { rowCount } = await tx.query(
+    `UPDATE step_executions
+        SET status = 'skipped',
+            finished_at = now(),
+            error_message = $4
+      WHERE run_started_at = $1
+        AND run_id = $2
+        AND node_id = ANY($3::text[])
+        AND status = 'pending'`,
+    [run.startedAt, run.id, [...nodeIds], reason],
+  )
+  return rowCount ?? 0
+}
+
 export async function listSteps(
   tx: Executor,
   run: { id: string; startedAt: Date },

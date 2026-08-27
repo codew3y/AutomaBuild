@@ -26,10 +26,12 @@ import {
   getRun,
   listSteps,
   recordFailure,
+  markSkipped,
   recordSuccess,
   writeDlqEntry,
 } from './repository.ts'
 import { StepFailure, type HandlerRegistry, type StepContext } from './handlers.ts'
+import { stepsToSkip } from '../branching.ts'
 import type { FlowDefinition, RunRow, StepRow } from '../types.ts'
 
 /**
@@ -228,6 +230,21 @@ export async function runStep(
         `UPDATE runs SET steps_succeeded = steps_succeeded + 1 WHERE started_at = $1 AND id = $2`,
         [input.runStartedAt, input.runId],
       )
+
+      // A branch that has just succeeded decides what never runs. In the same
+      // transaction as its own result, so a crash between the two cannot leave
+      // a resolved branch with both arms still pending — which would run both.
+      const taken = takenArm(output)
+      if (taken !== null && flow !== null) {
+        const abandoned = stepsToSkip(flow.edges ?? [], claimed.nodeId, taken)
+        await markSkipped(
+          tx,
+          { id: input.runId, startedAt: input.runStartedAt },
+          abandoned,
+          `not taken: ${claimed.nodeId} went ${taken}`,
+        )
+      }
+
       await enqueueAdvance(tx, input, claimed.tenantId)
       return { kind: 'succeeded', stepId: input.stepId }
     })
@@ -382,6 +399,20 @@ async function flowFor(deps: ExecutorDeps, run: RunRow): Promise<FlowDefinition>
   }
   if (deps.flow !== undefined) return deps.flow
   throw new Error('ExecutorDeps needs either flow or flows')
+}
+
+/**
+ * Which arm a branch step chose, or null if this was not a branch.
+ *
+ * The contract is narrow on purpose: a handler signals a branch decision by
+ * returning `{ taken: "yes" | "no" }`. Anything else — including a branch
+ * handler that forgets — resolves nothing, and the run stalls with both arms
+ * pending rather than quietly running both.
+ */
+function takenArm(output: unknown): "yes" | "no" | null {
+  if (output === null || typeof output !== "object") return null
+  const taken = (output as { taken?: unknown }).taken
+  return taken === "yes" || taken === "no" ? taken : null
 }
 
 function nodeFor(flow: FlowDefinition, step: StepRow) {

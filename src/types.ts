@@ -8,6 +8,10 @@
  * identity later would mean rewriting every partition.
  */
 
+import type { FlowEdge } from './branching.ts'
+
+export type { FlowEdge }
+
 export type RunStatus =
   | 'queued'
   | 'running'
@@ -54,8 +58,23 @@ export interface FlowNode {
 export interface FlowDefinition {
   readonly id: string
   readonly versionId: string
-  /** Executed in order. A linear chain, by construction. */
+  /**
+   * Every step, in topological order.
+   *
+   * Order still decides what runs next: the orchestrator takes the lowest
+   * unfinished step. `edges` does not change that — it exists so a branch can
+   * work out which steps its untaken arm abandons.
+   */
   readonly nodes: readonly FlowNode[]
+  /**
+   * How the steps connect.
+   *
+   * Optional, and absent means a straight chain in `nodes` order — which is
+   * what every flow was before branching existed, and still the common case.
+   * Required as soon as a `branch` step is present, because without it there
+   * is no way to know what the arms lead to.
+   */
+  readonly edges?: readonly FlowEdge[]
 }
 
 export interface RunRow {

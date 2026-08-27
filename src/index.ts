@@ -181,3 +181,11 @@ export {
   installSignalHandlers,
   startWorker,
 } from './engine/worker.ts'
+
+export {
+  evaluateCondition,
+  reachableFrom,
+  stepsToSkip,
+  type ConditionResult,
+  type FlowEdge,
+} from './branching.ts'
