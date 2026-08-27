@@ -42,6 +42,7 @@ import { outputTree, referenceFor, resolveTemplate } from './core/resolve.ts'
 import { buildRunView, outputsFromRun, summarise, type RunRecord } from './core/run.ts'
 import { describeRun, relativeTime, sortHistory, type RunListing } from './core/history.ts'
 import { diffGraph } from './core/patch.ts'
+import { apiFetch, readApiKey, writeApiKey, UnauthorizedError } from './core/api.ts'
 import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
 import { SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
@@ -290,6 +291,15 @@ function Editor() {
    */
   const [webhook, setWebhook] = useState<WebhookInfo | null>(null)
 
+  /**
+   * Set when the server has refused the key we hold.
+   *
+   * A banner rather than a modal: the editor still works offline against its
+   * own draft, and locking the whole screen over a missing credential would
+   * stop someone doing the work they can still do.
+   */
+  const [needsKey, setNeedsKey] = useState(false)
+
   const { screenToFlowPosition } = useReactFlow()
 
   const canUndo = useStore(graphStore.temporal, (state) => state.pastStates.length > 0)
@@ -331,10 +341,10 @@ function Editor() {
     // step log of a run nobody has asked to see yet — except that the viewer
     // does open on the latest one, so here it is worth it exactly once.
     Promise.all([
-      fetch('api/runs')
+      apiFetch('api/runs')
         .then((response) => (response.ok ? response.json() : null))
         .catch(() => null),
-      fetch('api/runs/latest')
+      apiFetch('api/runs/latest')
         .then((response) => (response.ok ? response.json() : null))
         .catch(() => null),
     ])
@@ -355,8 +365,10 @@ function Editor() {
           setHistory([describeRun(latest)])
         }
       })
-      .catch(() => {
-        // No backend. The sample is the point of the fallback, not an error.
+      .catch((error: unknown) => {
+        if (error instanceof UnauthorizedError) setNeedsKey(true)
+        // Otherwise there is no backend, and the sample is the point of the
+        // fallback rather than an error.
       })
 
     return () => {
@@ -366,14 +378,17 @@ function Editor() {
 
   useEffect(() => {
     let cancelled = false
-    fetch('api/webhook')
+    apiFetch('api/webhook')
       .then((response) => (response.ok ? response.json() : null))
       .then((data: WebhookInfo | null) => {
         if (cancelled || data === null || typeof data.url !== 'string') return
         setWebhook(data)
       })
-      .catch(() => {
-        // No backend. The trigger panel says as much.
+      .catch((error: unknown) => {
+        // A refused key is not the same as no server: one is fixable by typing
+        // something, the other is not, and showing "no backend" for both would
+        // send someone looking in entirely the wrong place.
+        if (error instanceof UnauthorizedError) setNeedsKey(true)
       })
     return () => {
       cancelled = true
@@ -384,14 +399,14 @@ function Editor() {
   // which is a state rather than an error.
   useEffect(() => {
     let cancelled = false
-    fetch('api/flows/published')
+    apiFetch('api/flows/published')
       .then((response) => (response.ok ? response.json() : null))
       .then((data: { versionId: string; graph: FlowGraph } | null) => {
         if (cancelled || data === null || !Array.isArray(data.graph?.nodes)) return
         setPublished({ versionId: data.versionId, graph: data.graph })
       })
-      .catch(() => {
-        // No backend. Publishing is simply unavailable, which the button says.
+      .catch((error: unknown) => {
+        if (error instanceof UnauthorizedError) setNeedsKey(true)
       })
     return () => {
       cancelled = true
@@ -417,7 +432,7 @@ function Editor() {
     setPublishError(null)
     const snapshot = graphStore.getState().snapshot()
 
-    fetch('api/flows/published', {
+    apiFetch('api/flows/published', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ graph: snapshot }),
@@ -443,6 +458,7 @@ function Editor() {
         setPublishState('ready')
       })
       .catch((error: unknown) => {
+        if (error instanceof UnauthorizedError) setNeedsKey(true)
         setPublishError(error instanceof Error ? error.message : String(error))
         setPublishState('error')
       })
@@ -469,7 +485,7 @@ function Editor() {
     (id: string) => {
       if (id === run.id) return
       setLoadingRun(true)
-      fetch(`api/runs/${encodeURIComponent(id)}`)
+      apiFetch(`api/runs/${encodeURIComponent(id)}`)
         .then((response) => (response.ok ? response.json() : null))
         .then((data: RunRecord | null) => {
           if (data === null || !Array.isArray(data.steps)) return
@@ -887,6 +903,36 @@ function Editor() {
           </span>
         )}
       </header>
+
+      {needsKey && (
+        <div className="restored needs-key" role="alert">
+          <span>
+            The server requires a key. Paste the value of <code>API_KEY</code>:
+          </span>
+          <input
+            type="password"
+            aria-label="API key"
+            placeholder="API key"
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter') return
+              const value = event.currentTarget.value.trim()
+              if (value === '') return
+              writeApiKey(value)
+              // A reload rather than re-running each fetch by hand: several
+              // requests failed, and re-issuing them individually is a list
+              // that will fall out of step with the ones above.
+              window.location.reload()
+            }}
+          />
+          <button
+            className="dismiss"
+            aria-label="Dismiss"
+            onClick={() => setNeedsKey(false)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {publishError !== null && !viewing && (
         <div className="restored publish-error" role="alert">
