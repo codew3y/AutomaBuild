@@ -1221,6 +1221,7 @@ function Editor() {
               issues={issues}
               outputs={mappingOutputs}
               live={live}
+              editable={setupOpen}
               onDelete={deleteSelected}
               onOpenSetup={() => setSetupOpen(true)}
             />
@@ -1334,6 +1335,7 @@ function EditPanel({
   issues,
   outputs,
   live,
+  editable,
   onDelete,
   onOpenSetup,
 }: {
@@ -1341,6 +1343,15 @@ function EditPanel({
   issues: readonly ValidationIssue[]
   outputs: Record<string, unknown>
   live: boolean
+  /**
+   * Whether the panel may change the step.
+   *
+   * True only while the setup dialog is open. Selecting a step is for looking
+   * at it — clicking a field in the mapping tree used to write into the step
+   * with no dialog in sight, which made a single click an edit and gave no
+   * hint that it had been one.
+   */
+  editable: boolean
   onDelete: () => void
   onOpenSetup: () => void
 }) {
@@ -1369,6 +1380,7 @@ function EditPanel({
               data={selected.data}
               outputs={outputs}
               live={live}
+              editable={editable}
             />
             <button className="danger" onClick={onDelete}>
               Delete this step
@@ -1419,12 +1431,14 @@ function MappingPanel({
   data,
   outputs: allOutputs,
   live,
+  editable,
 }: {
   nodeId: string
   kind: string
   data: Record<string, unknown>
   outputs: Record<string, unknown>
   live: boolean
+  editable: boolean
 }) {
   const nodes = useStore(graphStore, (state) => state.nodes)
   const edges = useStore(graphStore, (state) => state.edges)
@@ -1511,12 +1525,16 @@ function MappingPanel({
 
   const insert = useCallback(
     (path: string) => {
+      // Belt as well as braces: the buttons are disabled when not editable, but
+      // a panel that can write to a step while no dialog is open is the bug
+      // being fixed, and it should not depend on a `disabled` attribute.
+      if (!editable) return
       if (target === '') return
       const next = `${targetValue}${targetValue.length > 0 ? ' ' : ''}${referenceFor(path)}`
       graphStore.getState().updateNodeData(nodeId, { [target]: next })
       graphStore.endGesture()
     },
-    [target, targetValue, nodeId],
+    [editable, target, targetValue, nodeId],
   )
 
   if (fields.length === 0) {
@@ -1571,6 +1589,13 @@ function MappingPanel({
         <span className="tree-source muted">{live ? "from the last run" : "sample data"}</span>
       </h2>
 
+      {!editable && (
+        <p className="muted tree-readonly">
+          Looking, not editing. Double-click the step — or press Setup… — to
+          insert any of these.
+        </p>
+      )}
+
       {sources.length > 0 && (
         <label className="field">
           <span>from step</span>
@@ -1610,11 +1635,13 @@ function MappingPanel({
               <button
                 className="pill"
                 onClick={() => insert(leaf.path)}
-                disabled={leaf.kind === 'object' || leaf.kind === 'array'}
+                disabled={!editable || leaf.kind === 'object' || leaf.kind === 'array'}
                 title={
                   leaf.kind === 'object' || leaf.kind === 'array'
                     ? 'Pick a field inside this'
-                    : `Insert ${referenceFor(leaf.path)}`
+                    : editable
+                      ? `Insert ${referenceFor(leaf.path)}`
+                      : `${referenceFor(leaf.path)} — open Setup to insert it`
                 }
               >
                 <span className="pill-key">{leaf.key}</span>
