@@ -1,0 +1,31 @@
+{
+  "name": "automabuild-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The four components composed into one running system.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:migrate": "node src/migrate.ts",
+    "start": "node src/server.ts",
+    "demo": "node src/demo.ts",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "automa-safe-fetch": "^0.1.1",
+    "automa-webhook-gate": "github:codew3y/automa-webhook-gate",
+    "automa-durable-runner": "github:codew3y/automa-durable-runner",
+    "fastify": "^5.12.1",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "typescript": "^5.9.2"
+  }
+}

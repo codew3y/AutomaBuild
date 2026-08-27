@@ -4,7 +4,7 @@ This folder is a **container for five separate git repositories**. It is not its
 
 ```
 autobuild/                                  # workspace root, not a repo
-├── AutomaBuild/            → github.com/codew3y/AutomaBuild          (plan + this index -- you are here)
+├── AutomaBuild/            → github.com/codew3y/AutomaBuild          (plan, this index, and app/ -- you are here)
 ├── automa-safe-fetch/      → github.com/codew3y/automa-safe-fetch    (A)
 ├── automa-webhook-gate/    → github.com/codew3y/automa-webhook-gate  (B)
 ├── automa-durable-runner/  → github.com/codew3y/automa-durable-runner(C)

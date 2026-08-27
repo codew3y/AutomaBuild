@@ -1,0 +1,68 @@
+# The whole system: two databases, and nothing else.
+#
+#   npm run db:up && npm run db:migrate && npm start
+#
+# Two Postgres services rather than one, because the gate and the engine are
+# separate libraries with separate migration histories, and neither is allowed
+# to assume the other's tables exist. Running them apart here is what keeps
+# that honest — a single database would let a shared table creep in without
+# anyone noticing until the two were deployed separately.
+#
+# The ports are deliberately not the ones the component repositories use, so
+# this stack can run alongside them without a collision.
+
+name: automabuild
+
+services:
+  # The engine's database. Needs the derived image: pg_partman creates the
+  # daily partitions and pg_cron runs its maintenance, and neither ships with
+  # the official Postgres image.
+  runner-db:
+    build:
+      context: ./docker/postgres
+    environment:
+      POSTGRES_DB: automa
+      POSTGRES_USER: automa
+      POSTGRES_PASSWORD: automa
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    ports:
+      - '54339:5432'
+    volumes:
+      # Postgres 18 keeps data in a major-version subdirectory, so the mount
+      # belongs at /var/lib/postgresql and not .../data as it did through 17.
+      - runner-data:/var/lib/postgresql
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    command:
+      - postgres
+      - -c
+      - log_min_duration_statement=200
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U automa -d automa']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  # The gate's replay store. One table, so the stock image is enough.
+  gate-db:
+    image: postgres:18-trixie
+    environment:
+      POSTGRES_DB: webhookgate
+      POSTGRES_USER: webhookgate
+      POSTGRES_PASSWORD: webhookgate
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    ports:
+      - '54341:5432'
+    volumes:
+      - gate-data:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U webhookgate -d webhookgate']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  runner-data:
+  gate-data:

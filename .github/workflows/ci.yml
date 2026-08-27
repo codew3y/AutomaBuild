@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: the four components, joined
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # No lockfile commit: the three components are installed from their
+      # default branches on purpose, so this build is what catches a change in
+      # one of them breaking the join. That is the entire reason this workflow
+      # exists — a green component repository proves nothing about the seam.
+      - run: npm install
+
+      - run: npm run typecheck
+      - run: npm test
+
+      - run: docker compose up -d --build
+
+      - name: wait for both databases
+        run: |
+          for _ in $(seq 1 90); do
+            runner=$(docker compose exec -T runner-db pg_isready -U automa -d automa >/dev/null 2>&1 && echo ok)
+            gate=$(docker compose exec -T gate-db pg_isready -U webhookgate -d webhookgate >/dev/null 2>&1 && echo ok)
+            if [ "$runner" = ok ] && [ "$gate" = ok ]; then
+              echo ready
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the databases did not come up"
+          docker compose logs --tail 40
+          exit 1
+
+      - run: npm run db:migrate
+        env:
+          WEBHOOK_SECRETS: whsec_ci_secret
+
+      # The demo is the deliverable, so it runs here rather than being a thing
+      # that worked once on somebody's laptop. It fails the build if a forgery
+      # is accepted, a duplicate starts a second run, or a mapped reference
+      # does not resolve.
+      - run: npm run demo
+        env:
+          WEBHOOK_SECRETS: whsec_ci_secret
+
+      - name: logs on failure
+        if: failure()
+        run: docker compose logs --tail 100

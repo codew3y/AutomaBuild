@@ -1,0 +1,11 @@
+node_modules/
+
+# Not committed, deliberately.
+#
+# The three components are installed from their default branches, so a lockfile
+# would pin the commits and CI would stop being able to catch a change in one
+# of them breaking the join — which is the only reason this application's CI
+# exists. The cost is that an install is not byte-reproducible; that is the
+# right trade for a repository whose job is to prove the four still fit
+# together, and the wrong one for anything being deployed.
+package-lock.json

@@ -1,0 +1,184 @@
+/**
+ * Step handlers that resolve the canvas's `{{ }}` references.
+ *
+ * The mapping panel lets someone write `{{ steps.fetch.output.email }}` into a
+ * field, and the preview shows what it will become. The engine's HTTP handler
+ * takes `config.url` literally. Without something in between, a mapped URL is
+ * requested verbatim, braces and all — the preview promises something the run
+ * does not deliver, which is worse than not offering mapping at all.
+ *
+ * This is that in-between. It resolves the config against the upstream outputs
+ * the engine already hands every step, then delegates to the engine's own
+ * handler — so SSRF checking, timeouts, idempotency keys and error
+ * classification are unchanged. Resolution is the only thing added.
+ */
+
+import { defaultHandlers, type HandlerRegistry, type StepContext, type StepHandler, type StepResult } from 'automa-durable-runner'
+
+/** `{{ steps.fetch.output.email }}` — whitespace-tolerant, nothing else. */
+const REFERENCE = /\{\{\s*([^}]+?)\s*\}\}/g
+
+/**
+ * Follow a dotted path, including `orders[0].total`.
+ *
+ * Returns `undefined` for anything missing rather than throwing. A reference
+ * to a field that is not there is a mapping mistake to be reported, not a
+ * crash mid-run — and the engine would classify a thrown TypeError as
+ * `internal`, which would blame the engine for the flow's error.
+ */
+export function readPath(root: unknown, path: string): unknown {
+  const segments = path
+    .replace(/\[(\d+)\]/g, '.$1')
+    .split('.')
+    .filter((segment) => segment !== '')
+
+  let value: unknown = root
+  for (const segment of segments) {
+    if (value === null || value === undefined) return undefined
+    if (typeof value !== 'object') return undefined
+    value = (value as Record<string, unknown>)[segment]
+  }
+  return value
+}
+
+export interface ResolveResult {
+  readonly value: string
+  /** References that resolved to nothing. */
+  readonly missing: readonly string[]
+}
+
+/**
+ * Substitute every reference in a string.
+ *
+ * A template that is exactly one reference and nothing else keeps the
+ * referenced value's type when it is handed to `resolveConfig` below — a
+ * `body` of `{{ steps.x.output.payload }}` should send the object, not
+ * `[object Object]`. Inside a larger string it is stringified, because that is
+ * the only thing concatenation can mean.
+ */
+export function resolveTemplate(template: string, scope: unknown): ResolveResult {
+  const missing: string[] = []
+  const value = template.replace(REFERENCE, (_match, path: string) => {
+    const resolved = readPath(scope, path)
+    if (resolved === undefined || resolved === null) {
+      missing.push(path)
+      // The reference is left in place rather than blanked. A URL that still
+      // visibly says `{{ steps.x.output.id }}` is a legible failure; one that
+      // silently became `https://api.example.com/customers/` is a request to
+      // the wrong endpoint that looks fine in a log.
+      return _match as string
+    }
+    return typeof resolved === 'string' ? resolved : JSON.stringify(resolved)
+  })
+  return { value, missing }
+}
+
+/** True when the whole string is a single reference, so its type survives. */
+function isSoleReference(template: string): boolean {
+  const match = /^\s*\{\{\s*([^}]+?)\s*\}\}\s*$/.exec(template)
+  return match !== null
+}
+
+export interface ResolvedConfig {
+  readonly config: Record<string, unknown>
+  readonly missing: readonly string[]
+}
+
+/**
+ * Resolve every string in a step's config.
+ *
+ * Recurses into nested objects and arrays, because `headers` is an object and
+ * a mapped `Authorization` is the most obvious thing someone will write.
+ */
+export function resolveConfig(config: Record<string, unknown>, scope: unknown): ResolvedConfig {
+  const missing: string[] = []
+
+  const walk = (value: unknown): unknown => {
+    if (typeof value === 'string') {
+      if (!value.includes('{{')) return value
+      if (isSoleReference(value)) {
+        const path = /^\s*\{\{\s*([^}]+?)\s*\}\}\s*$/.exec(value)![1]!
+        const resolved = readPath(scope, path)
+        if (resolved === undefined || resolved === null) {
+          missing.push(path)
+          return value
+        }
+        return resolved
+      }
+      const result = resolveTemplate(value, scope)
+      missing.push(...result.missing)
+      return result.value
+    }
+    if (Array.isArray(value)) return value.map(walk)
+    if (value !== null && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, walk(v)]))
+    }
+    return value
+  }
+
+  return { config: walk(config) as Record<string, unknown>, missing }
+}
+
+/**
+ * The scope a reference is resolved against.
+ *
+ * `steps.<nodeId>.output.<path>` is the canvas's shape, and the engine hands
+ * over `upstream` keyed by node id holding the output directly. The extra
+ * `output` level is added here so the two agree — the alternative is teaching
+ * the editor a different syntax from the one it shows in its own preview.
+ */
+export function scopeFor(context: StepContext): Record<string, unknown> {
+  const steps: Record<string, unknown> = {}
+  for (const [nodeId, output] of Object.entries(context.upstream)) {
+    steps[nodeId] = { output }
+  }
+  // The trigger is reachable two ways on purpose. `trigger.body` is what the
+  // editor's own tree calls it, and `steps.<triggerNode>.output` is what
+  // referring to the trigger like any other step produces — both appear in
+  // real flows, and a reference that resolves in the preview and not at run
+  // time is the failure this whole module exists to prevent.
+  return { steps, trigger: { body: context.run.input } }
+}
+
+/**
+ * Wrap a handler so its config is resolved before it runs.
+ *
+ * An unresolved reference fails the step rather than proceeding with a literal
+ * `{{ }}` in it. It is thrown as an ordinary error, which the engine
+ * classifies as `internal` and retries — and that is right: the reference is
+ * usually missing because the upstream step has not produced its output yet in
+ * a partially-resumed run, and a retry is exactly what fixes that. A genuinely
+ * wrong path exhausts its attempts and lands in the DLQ with the path in the
+ * message, which is what someone debugging needs to see.
+ */
+export function withMapping(handler: StepHandler): StepHandler {
+  return async (context: StepContext): Promise<StepResult> => {
+    const raw = context.node.config ?? {}
+    const { config, missing } = resolveConfig(raw, scopeFor(context))
+
+    if (missing.length > 0) {
+      throw new Error(`unresolved reference${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`)
+    }
+
+    // The node is replaced rather than mutated: the engine holds the flow
+    // definition across every step, and mutating config here would leave the
+    // resolved values in place for the next run through the same object.
+    return handler({ ...context, node: { ...context.node, config } })
+  }
+}
+
+/**
+ * The trigger step: publish what started the run, and do nothing else.
+ *
+ * It is a real step rather than a synthetic row so that the ordinary machinery
+ * applies to it — it appears in the run viewer, it has a duration, and it can
+ * be referred to by later steps the same way any other step can. Its output is
+ * the run input verbatim.
+ */
+export const triggerHandler: StepHandler = async (context) => ({ output: context.run.input })
+
+/** The engine's handlers, each able to resolve the editor's references. */
+export function mappingHandlers(): HandlerRegistry {
+  const base: Record<string, StepHandler> = { ...defaultHandlers(), trigger: triggerHandler }
+  return Object.fromEntries(Object.entries(base).map(([kind, handler]) => [kind, withMapping(handler)]))
+}
