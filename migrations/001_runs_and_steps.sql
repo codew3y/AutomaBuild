@@ -58,7 +58,14 @@ CREATE TABLE runs (
   steps_succeeded       integer     NOT NULL DEFAULT 0,
   steps_failed          integer     NOT NULL DEFAULT 0,
 
-  started_at            timestamptz NOT NULL DEFAULT now(),
+  -- timestamptz(3), not timestamptz. This is the partition key, and it is
+  -- round-tripped through JavaScript Dates, which hold milliseconds and not
+  -- microseconds. At full precision now() stores .319437, a Date carries back
+  -- .319, and every lookup by (started_at, id) silently misses. Worse, the
+  -- value denormalised into step_executions.run_started_at would disagree
+  -- with this column in its sub-millisecond digits, breaking the very
+  -- partition-local join the denormalisation exists to enable.
+  started_at            timestamptz(3) NOT NULL DEFAULT now(),
   finished_at           timestamptz,
   -- Wall-clock deadline for the whole run, computed from the database clock so
   -- there is exactly one clock in the system.
@@ -87,7 +94,7 @@ CREATE TABLE step_executions (
   -- Denormalised from runs.started_at. Required, not merely convenient: it is
   -- this table's partition key, and it is what makes a join to runs land in a
   -- single partition on each side instead of scanning ninety.
-  run_started_at    timestamptz NOT NULL,
+  run_started_at    timestamptz(3) NOT NULL,
 
   node_id           text        NOT NULL,
   -- Loop fan-out position. Always 0 in v1, which is linear chains only, but

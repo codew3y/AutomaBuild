@@ -31,7 +31,7 @@ CREATE TABLE run_idempotency (
   -- Points back at the run this key created. Both columns, because reaching a
   -- partitioned table efficiently requires its partition key.
   run_id          uuid        NOT NULL,
-  run_started_at  timestamptz NOT NULL,
+  run_started_at  timestamptz(3) NOT NULL,
 
   created_at      timestamptz NOT NULL DEFAULT now(),
 

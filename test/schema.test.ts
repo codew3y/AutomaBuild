@@ -121,6 +121,56 @@ describe('schema', { skip: SKIP }, () => {
     assert.deepEqual(byTable.get('step_executions'), ['run_started_at', 'id'])
   })
 
+  it('stores partition keys at millisecond precision', async () => {
+    // Regression, and a subtle one. A JavaScript Date holds milliseconds; a
+    // plain timestamptz holds microseconds. At full precision, now() stores
+    // .319437, the driver hands back .319, and every subsequent lookup by
+    // (started_at, id) silently misses — while the same truncated value gets
+    // denormalised into step_executions.run_started_at, so the two tables end
+    // up disagreeing about the partition key that is supposed to join them.
+    const { rows } = await db.query<{ scale: number; table: string; column: string }>(
+      `SELECT c.relname AS table, a.attname AS column,
+              information_schema._pg_datetime_precision(a.atttypid, a.atttypmod) AS scale
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+        WHERE (c.relname, a.attname) IN
+              (('runs','started_at'), ('step_executions','run_started_at'),
+               ('run_idempotency','run_started_at'))
+          AND a.attnum > 0`,
+    )
+    assert.ok(rows.length >= 3, 'expected all three partition-key columns')
+    for (const row of rows) {
+      assert.equal(row.scale, 3, `${row.table}.${row.column} is not millisecond precision`)
+    }
+  })
+
+  it('round-trips a partition key through a JavaScript Date without loss', async () => {
+    const run = await insertRun()
+    const { rowCount } = await db.query(
+      'SELECT 1 FROM runs WHERE started_at = $1 AND id = $2',
+      [run.startedAt, run.id],
+    )
+    assert.equal(rowCount, 1, 'a run could not be found by the timestamp it just returned')
+  })
+
+  it('keeps runs and step_executions agreeing on the partition key', async () => {
+    const run = await insertRun()
+    await db.query(
+      `INSERT INTO step_executions
+         (tenant_id, run_id, run_started_at, node_id, topo_order, step_kind, status, idempotency_key)
+       VALUES ($1, $2, $3, 'node-join', 0, 'noop', 'pending', 'key-join')`,
+      [tenant, run.id, run.startedAt],
+    )
+    const { rowCount } = await db.query(
+      `SELECT 1 FROM runs r
+         JOIN step_executions s
+           ON s.run_id = r.id AND s.run_started_at = r.started_at
+        WHERE r.id = $1 AND r.started_at = $2`,
+      [run.id, run.startedAt],
+    )
+    assert.equal(rowCount, 1, 'the partition-local join found nothing — the timestamps disagree')
+  })
+
   it('generates time-ordered ids, so inserts land at the index edge', async () => {
     const first = await insertRun()
     const second = await insertRun()

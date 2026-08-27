@@ -48,7 +48,7 @@ CREATE TABLE dlq_entries (
   tenant_id         uuid        NOT NULL,
 
   run_id            uuid,
-  run_started_at    timestamptz,
+  run_started_at    timestamptz(3),
   step_execution_id uuid,
   flow_version_id   uuid,
   node_id           text,
