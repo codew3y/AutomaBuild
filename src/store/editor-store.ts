@@ -26,12 +26,24 @@ export type Mode = 'edit' | 'run'
 
 export interface EditorState {
   readonly selectedNodeId: string | null
+  /**
+   * Whether each side panel is showing.
+   *
+   * Here rather than in the graph store, like every other piece of view state:
+   * collapsing a panel is not an edit, and it must never appear in the undo
+   * stack. Someone who hides the library and then presses ctrl-Z expects their
+   * last *edit* back, not the panel.
+   */
+  readonly leftPanelOpen: boolean
+  readonly rightPanelOpen: boolean
   readonly viewport: Viewport
   readonly panelTab: PanelTab
   readonly paletteOpen: boolean
   readonly mode: Mode
 
   select(nodeId: string | null): void
+  toggleLeftPanel(): void
+  toggleRightPanel(): void
   setViewport(viewport: Viewport): void
   setPanelTab(tab: PanelTab): void
   togglePalette(): void
@@ -41,6 +53,8 @@ export interface EditorState {
 export const createEditorStore = () =>
   createStore<EditorState>()((set) => ({
     selectedNodeId: null,
+    leftPanelOpen: true,
+    rightPanelOpen: true,
     viewport: { x: 0, y: 0, zoom: 1 },
     panelTab: 'setup',
     paletteOpen: true,
@@ -48,6 +62,12 @@ export const createEditorStore = () =>
 
     select(nodeId) {
       set({ selectedNodeId: nodeId })
+    },
+    toggleLeftPanel() {
+      set((state) => ({ leftPanelOpen: !state.leftPanelOpen }))
+    },
+    toggleRightPanel() {
+      set((state) => ({ rightPanelOpen: !state.rightPanelOpen }))
     },
     setViewport(viewport) {
       set({ viewport })

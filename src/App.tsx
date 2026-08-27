@@ -51,6 +51,67 @@ const editorStore = createEditorStore()
 
 const DRAFT_KEY = 'automa-flow-canvas:draft'
 
+export interface WebhookInfo {
+  readonly url: string
+  readonly endpointId: string
+  readonly scheme: string
+  readonly signatureHeader: string
+  readonly secretConfigured: boolean
+}
+
+/**
+ * The address a trigger listens on.
+ *
+ * Rendered in the setup dialog for a trigger step and nowhere else, because
+ * that is where someone goes when they ask "where do I send it". The secret is
+ * deliberately absent: the server does not serve it, and a UI that displayed
+ * one would be a UI that had been given one.
+ */
+function TriggerEndpoint({ webhook }: { readonly webhook: WebhookInfo | null }) {
+  const [copied, setCopied] = useState(false)
+
+  if (webhook === null) {
+    return (
+      <p className="muted endpoint-none">
+        No server is connected, so this trigger has no address yet. Start the
+        AutomaBuild server and reload.
+      </p>
+    )
+  }
+
+  return (
+    <div className="endpoint">
+      <span className="preview-label">webhook url</span>
+      <code className="endpoint-url">{webhook.url}</code>
+
+      <div className="endpoint-meta muted">
+        <span>
+          POST · signed with <code>{webhook.signatureHeader}</code> ({webhook.scheme})
+        </span>
+        {!webhook.secretConfigured && (
+          <span className="endpoint-warn">No signing secret is configured on the server.</span>
+        )}
+      </div>
+
+      <button
+        onClick={() => {
+          // clipboard is unavailable over plain http on some browsers, so a
+          // failure here is expected rather than exceptional.
+          navigator.clipboard?.writeText(webhook.url).then(
+            () => {
+              setCopied(true)
+              setTimeout(() => setCopied(false), 1500)
+            },
+            () => setCopied(false),
+          )
+        }}
+      >
+        {copied ? 'Copied' : 'Copy URL'}
+      </button>
+    </div>
+  )
+}
+
 /** What each kind is for, in the words someone building a flow would use. */
 const KIND_BLURB: Record<string, string> = {
   http: 'Call an API',
@@ -199,6 +260,8 @@ function Editor() {
   const edges = useStore(graphStore, (state) => state.edges)
   const selectedNodeId = useStore(editorStore, (state) => state.selectedNodeId)
   const mode = useStore(editorStore, (state) => state.mode)
+  const leftPanelOpen = useStore(editorStore, (state) => state.leftPanelOpen)
+  const rightPanelOpen = useStore(editorStore, (state) => state.rightPanelOpen)
 
   const [saveState, setSaveState] = useState<SaveState>('saved')
   const [restored, setRestored] = useState(false)
@@ -216,6 +279,16 @@ function Editor() {
   const [published, setPublished] = useState<{ versionId: string; graph: FlowGraph } | null>(null)
   const [publishState, setPublishState] = useState<'ready' | 'sending' | 'error'>('ready')
   const [publishError, setPublishError] = useState<string | null>(null)
+
+  /**
+   * Where a webhook should be sent.
+   *
+   * A trigger with no address is a step nobody can use: you can build the flow
+   * and have no idea what to point at it. Null when there is no backend, in
+   * which case the setup panel says so rather than showing a URL that is not
+   * listening.
+   */
+  const [webhook, setWebhook] = useState<WebhookInfo | null>(null)
 
   const { screenToFlowPosition } = useReactFlow()
 
@@ -286,6 +359,22 @@ function Editor() {
         // No backend. The sample is the point of the fallback, not an error.
       })
 
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('api/webhook')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: WebhookInfo | null) => {
+        if (cancelled || data === null || typeof data.url !== 'string') return
+        setWebhook(data)
+      })
+      .catch(() => {
+        // No backend. The trigger panel says as much.
+      })
     return () => {
       cancelled = true
     }
@@ -645,6 +734,22 @@ function Editor() {
   return (
     <div className="editor">
       <header className="toolbar">
+        {/*
+          The toggle sits at the left edge, next to the panel it controls, so
+          the thing it acts on is obvious without a tooltip. Its pressed state
+          is on aria-pressed rather than only in the icon, because "is the
+          panel open" is exactly what a screen reader user cannot see.
+        */}
+        <button
+          className="panel-toggle"
+          onClick={() => editorStore.getState().toggleLeftPanel()}
+          aria-pressed={leftPanelOpen}
+          aria-label={leftPanelOpen ? 'Hide the left panel' : 'Show the left panel'}
+          title={leftPanelOpen ? 'Hide the left panel' : 'Show the left panel'}
+        >
+          ☰
+        </button>
+
         <strong className="brand">Automabuild</strong>
 
         <div className="modes">
@@ -746,6 +851,16 @@ function Editor() {
           </>
         )}
 
+        <button
+          className="panel-toggle right"
+          onClick={() => editorStore.getState().toggleRightPanel()}
+          aria-pressed={rightPanelOpen}
+          aria-label={rightPanelOpen ? 'Hide the right panel' : 'Show the right panel'}
+          title={rightPanelOpen ? 'Hide the right panel' : 'Show the right panel'}
+        >
+          ☰
+        </button>
+
         {viewing && (
           <span className="run-summary">
             {live ? '● live' : '○ sample'} · {run.id} · {runSummary.succeeded} ok ·{' '}
@@ -785,7 +900,7 @@ function Editor() {
       )}
 
       <div className="workspace">
-        {viewing ? (
+        {!leftPanelOpen ? null : viewing ? (
           <RunHistory
             history={history}
             currentId={run.id}
@@ -825,7 +940,7 @@ function Editor() {
           <Controls showInteractive={false} />
         </ReactFlow>
 
-        <aside className="panel">
+        <aside className="panel" hidden={!rightPanelOpen}>
           {viewing ? (
             <RunPanel selectedId={selectedNodeId} run={run} live={live} />
           ) : (
@@ -845,6 +960,7 @@ function Editor() {
           kind={selected.kind}
           data={selected.data}
           onClose={() => setSetupOpen(false)}
+          webhook={webhook}
           onDelete={() => {
             setSetupOpen(false)
             deleteSelected()
@@ -873,12 +989,14 @@ function SetupDialog({
   data,
   onClose,
   onDelete,
+  webhook,
 }: {
   nodeId: string
   kind: string
   data: Record<string, unknown>
   onClose: () => void
   onDelete: () => void
+  webhook: WebhookInfo | null
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -913,6 +1031,9 @@ function SetupDialog({
         </header>
 
         <div className="dialog-body">
+          {/* A trigger is the one step whose most useful fact is not a field:
+              it is the address to send to. */}
+          {kind === "trigger" && <TriggerEndpoint webhook={webhook} />}
           <StepForm key={nodeId} nodeId={nodeId} kind={kind} data={data} />
         </div>
 

@@ -510,3 +510,53 @@ button.danger.inline { width: auto; margin-top: 0; }
   background: color-mix(in srgb, var(--error) 12%, transparent);
   color: var(--fg);
 }
+
+/* ---------------------------------------------------- trigger endpoint */
+
+.endpoint {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  padding: .6rem .7rem;
+  margin-bottom: .9rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: .35rem;
+  background: var(--panel);
+}
+
+/* The URL wraps rather than scrolling: it is meant to be read and copied, and
+   a horizontally scrolling box hides the half that matters. */
+.endpoint-url {
+  font-family: ui-monospace, monospace;
+  font-size: .78rem;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.endpoint-meta { display: flex; flex-direction: column; gap: .2rem; font-size: .74rem; }
+.endpoint-meta code { font-size: .72rem; }
+.endpoint-warn { color: var(--warn); font-weight: 600; }
+.endpoint button { align-self: flex-start; font-size: .78rem; }
+.endpoint-none { margin: 0 0 .9rem; }
+
+/* ------------------------------------------------------- panel toggles */
+
+.panel-toggle {
+  font-size: 1rem;
+  line-height: 1;
+  padding: .3rem .5rem;
+  color: var(--muted);
+}
+.panel-toggle:hover { color: var(--fg); }
+
+/* A pressed toggle means the panel is showing. Colour alone would leave the
+   state invisible to anyone who cannot see it, so aria-pressed carries it too
+   and this is only the visible half. */
+.panel-toggle[aria-pressed='true'] { color: var(--fg); border-color: var(--muted); }
+
+.panel-toggle.right { margin-left: .2rem; }
+
+/* `hidden` on a flex child is overridden by `display: flex` unless this says
+   otherwise — the attribute would be set and the panel would stay visible. */
+.panel[hidden] { display: none; }
