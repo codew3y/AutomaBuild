@@ -268,8 +268,15 @@ button.danger { border-color: var(--error); color: var(--error); margin-top: .5r
 .tree-heading { margin-top: 1rem; }
 .tree { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .15rem; }
 
+/* Three columns, not a flex row.
+   
+   With flex, the kind label sat immediately after the name, so its position
+   moved with the length of the name and nothing lined up down the list. Fixed
+   columns mean name, kind and value each start at the same place on every row,
+   which is what makes the tree scannable. */
 .pill {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3.6rem 7.5rem;
   align-items: baseline;
   gap: .4rem;
   width: 100%;
@@ -278,17 +285,25 @@ button.danger { border-color: var(--error); color: var(--error); margin-top: .5r
   padding: .22rem .45rem;
 }
 .pill:disabled { opacity: .6; cursor: default; }
-.pill-key { font-family: ui-monospace, monospace; }
-.pill-kind { font-size: .66rem; color: var(--muted); }
+
+/* Every cell truncates rather than wrapping: one row per field keeps the
+   columns aligned, and a wrapped name would push its own kind and value out of
+   line with everything above it. */
+.pill-key,
 .pill-value {
-  margin-left: auto;
   font-family: ui-monospace, monospace;
-  color: var(--muted);
-  max-width: 9rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.pill-kind {
+  font-size: .66rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pill-value { color: var(--muted); text-align: right; }
 
 /* ----------------------------------------------------------- run viewer */
 

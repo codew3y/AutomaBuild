@@ -1631,7 +1631,7 @@ function MappingPanel({
       ) : (
         <ul className="tree">
           {leaves.map((leaf) => (
-            <li key={leaf.path} style={{ paddingLeft: `${(leaf.depth - 1) * 0.7}rem` }}>
+            <li key={leaf.path}>
               <button
                 className="pill"
                 onClick={() => insert(leaf.path)}
@@ -1644,7 +1644,15 @@ function MappingPanel({
                       : `${referenceFor(leaf.path)} — open Setup to insert it`
                 }
               >
-                <span className="pill-key">{leaf.key}</span>
+                {/* Nesting is shown by indenting the name only. Indenting the
+                    whole row shifts the kind and value columns with it, so
+                    nothing lines up down the list. */}
+                <span
+                  className="pill-key"
+                  style={{ paddingLeft: `${(leaf.depth - 1) * 0.7}rem` }}
+                >
+                  {leaf.key}
+                </span>
                 <span className={`pill-kind kind-${leaf.kind}`}>{leaf.kind}</span>
                 {leaf.kind !== 'object' && leaf.kind !== 'array' && (
                   <span className="pill-value">{String(leaf.value)}</span>
