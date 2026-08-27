@@ -577,3 +577,10 @@ button.danger.inline { width: auto; margin-top: 0; }
   color: var(--fg);
   min-width: 14rem;
 }
+
+/* The setup dialog is modal over the canvas but not over the right panel:
+   picking a field from the mapping tree while configuring a step is the whole
+   point, and a backdrop stretching under it would swallow those clicks. */
+.dialog-backdrop.beside-panel { right: 22rem; }
+
+.field-locked { color: var(--accent); font-weight: 600; }

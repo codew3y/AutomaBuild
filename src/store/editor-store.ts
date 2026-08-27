@@ -34,6 +34,15 @@ export interface EditorState {
    * stack. Someone who hides the library and then presses ctrl-Z expects their
    * last *edit* back, not the panel.
    */
+  /**
+   * The setup field that last had focus, and the step it belongs to.
+   *
+   * Deliberately not cleared on blur. Clicking a field in the mapping panel
+   * blurs the input first — mousedown, blur, then click — so clearing on blur
+   * would forget the target before the insert ever happened, and every click
+   * would silently do nothing.
+   */
+  readonly focusedField: { readonly nodeId: string; readonly field: string } | null
   readonly leftPanelOpen: boolean
   readonly rightPanelOpen: boolean
   readonly viewport: Viewport
@@ -42,6 +51,8 @@ export interface EditorState {
   readonly mode: Mode
 
   select(nodeId: string | null): void
+  focusField(nodeId: string, field: string): void
+  clearFocusedField(): void
   toggleLeftPanel(): void
   toggleRightPanel(): void
   setViewport(viewport: Viewport): void
@@ -53,6 +64,7 @@ export interface EditorState {
 export const createEditorStore = () =>
   createStore<EditorState>()((set) => ({
     selectedNodeId: null,
+    focusedField: null,
     leftPanelOpen: true,
     rightPanelOpen: true,
     viewport: { x: 0, y: 0, zoom: 1 },
@@ -62,6 +74,12 @@ export const createEditorStore = () =>
 
     select(nodeId) {
       set({ selectedNodeId: nodeId })
+    },
+    focusField(nodeId, field) {
+      set({ focusedField: { nodeId, field } })
+    },
+    clearFocusedField() {
+      set({ focusedField: null })
     },
     toggleLeftPanel() {
       set((state) => ({ leftPanelOpen: !state.leftPanelOpen }))

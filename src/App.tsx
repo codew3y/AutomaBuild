@@ -1235,6 +1235,7 @@ function Editor() {
           data={selected.data}
           onClose={() => setSetupOpen(false)}
           webhook={webhook}
+          panelOpen={rightPanelOpen}
           onDelete={() => {
             setSetupOpen(false)
             deleteSelected()
@@ -1264,6 +1265,7 @@ function SetupDialog({
   onClose,
   onDelete,
   webhook,
+  panelOpen,
 }: {
   nodeId: string
   kind: string
@@ -1271,6 +1273,8 @@ function SetupDialog({
   onClose: () => void
   onDelete: () => void
   webhook: WebhookInfo | null
+  /** Whether the right panel is showing, so the backdrop can leave it clear. */
+  panelOpen: boolean
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1282,7 +1286,7 @@ function SetupDialog({
 
   return (
     <div
-      className="dialog-backdrop"
+      className={panelOpen ? "dialog-backdrop beside-panel" : "dialog-backdrop"}
       onMouseDown={(event) => {
         // Only a click that both starts and ends on the backdrop dismisses.
         // Otherwise dragging to select text inside the dialog and releasing
@@ -1290,7 +1294,7 @@ function SetupDialog({
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="dialog" role="dialog" aria-modal="true" aria-label={`Configure ${nodeId}`}>
+      <div className="dialog" role="dialog" aria-label={`Configure ${nodeId}`}>
         <header className="dialog-header">
           <div>
             <strong>{String(data.label ?? nodeId)}</strong>
@@ -1424,6 +1428,7 @@ function MappingPanel({
 }) {
   const nodes = useStore(graphStore, (state) => state.nodes)
   const edges = useStore(graphStore, (state) => state.edges)
+  const focusedField = useStore(editorStore, (state) => state.focusedField)
   const fields = SCHEMAS[kind]?.fields ?? []
   const [activeField, setActiveField] = useState(fields[0] ?? '')
 
@@ -1444,21 +1449,33 @@ function MappingPanel({
     return [...upstream].filter((id) => allOutputs[id] === undefined)
   }, [nodes, edges, nodeId, allOutputs])
 
+  /**
+   * Where a clicked reference goes.
+   *
+   * The field being edited in the setup dialog wins over this panel’s own
+   * picker. Someone with the dialog open is looking at a field; making them
+   * re-select it in a second dropdown to fill it in is asking them to say the
+   * same thing twice.
+   */
+  const target = focusedField?.nodeId === nodeId ? focusedField.field : activeField
+  const targetValue = String(data[target] ?? '')
+
   const leaves = useMemo(() => outputTree(available), [available])
-  const currentValue = String(data[activeField] ?? '')
+  const currentValue = targetValue
   const preview = useMemo(
     () => resolveTemplate(currentValue, available),
     [currentValue, available],
   )
 
+
   const insert = useCallback(
     (path: string) => {
-      if (activeField === '') return
-      const next = `${currentValue}${currentValue.length > 0 ? ' ' : ''}${referenceFor(path)}`
-      graphStore.getState().updateNodeData(nodeId, { [activeField]: next })
+      if (target === '') return
+      const next = `${targetValue}${targetValue.length > 0 ? ' ' : ''}${referenceFor(path)}`
+      graphStore.getState().updateNodeData(nodeId, { [target]: next })
       graphStore.endGesture()
     },
-    [activeField, currentValue, nodeId],
+    [target, targetValue, nodeId],
   )
 
   if (fields.length === 0) {
@@ -1468,8 +1485,21 @@ function MappingPanel({
   return (
     <>
       <label className="field">
-        <span>field</span>
-        <select value={activeField} onChange={(event) => setActiveField(event.target.value)}>
+        <span>
+          field
+          {focusedField?.nodeId === nodeId && (
+            <span className="field-locked"> · editing in setup</span>
+          )}
+        </span>
+        <select
+          value={target}
+          onChange={(event) => {
+            // Choosing here takes over from the dialog, so the two cannot
+            // disagree about what a click will fill in.
+            editorStore.getState().clearFocusedField()
+            setActiveField(event.target.value)
+          }}
+        >
           {fields.map((field) => (
             <option key={field} value={field}>
               {field}
@@ -1634,6 +1664,7 @@ function StepForm({
           label={field}
           value={String(data[field] ?? '')}
           multiline={schema?.multiline?.includes(field) ?? false}
+          nodeId={nodeId}
           onCommit={(value) => {
             graphStore.getState().updateNodeData(nodeId, { [field]: value })
             graphStore.endGesture()
@@ -1655,17 +1686,27 @@ function Field({
   label,
   value,
   multiline = false,
+  nodeId,
   onCommit,
 }: {
   label: string
   value: string
   multiline?: boolean
+  /** Set only inside the setup dialog, where a mapping click can target it. */
+  nodeId?: string
   onCommit: (value: string) => void
 }) {
   const [draft, setDraft] = useState(value)
   useEffect(() => setDraft(value), [value])
 
   const commit = () => draft !== value && onCommit(draft)
+
+  // Announce which field the mapping panel should insert into. Not cleared on
+  // blur: clicking the panel blurs this input first, and clearing here would
+  // forget the target before the click landed.
+  const claimFocus = () => {
+    if (nodeId !== undefined) editorStore.getState().focusField(nodeId, label)
+  }
 
   // Enter blurs a single-line field, which is how you commit it. In a textarea
   // Enter is a newline — an email body without paragraphs is not a body — so
@@ -1687,6 +1728,7 @@ function Field({
           rows={5}
           onChange={(event) => setDraft(event.target.value)}
           onBlur={commit}
+          onFocus={claimFocus}
           onKeyDown={onKeyDown}
           placeholder="Hi {{ steps.fetch.output.name }},…"
         />
@@ -1695,6 +1737,7 @@ function Field({
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onBlur={commit}
+          onFocus={claimFocus}
           onKeyDown={onKeyDown}
           placeholder={label === 'url' ? 'https://…  or  {{ steps.x.output.url }}' : ''}
         />
