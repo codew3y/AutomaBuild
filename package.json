@@ -21,7 +21,8 @@
     "db:migrate": "node scripts/migrate.ts",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
-    "db:reset": "docker compose down -v && docker compose up -d"
+    "db:reset": "docker compose down -v && docker compose up -d",
+    "demo:chaos": "node scripts/demo-chaos.ts"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
