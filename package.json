@@ -21,7 +21,8 @@
     "db:reset": "docker compose down -v && docker compose up -d",
     "db:migrate": "node scripts/migrate.ts",
     "demo": "node src/demo.ts",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
