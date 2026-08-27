@@ -316,7 +316,7 @@ step_idempotency_key = sha256(run_id || node_id || iteration_index || attempt_gr
 
 Threading:
 
-- **Inbound**: webhook dedup on `(endpoint_id, provider_event_id | sha256(ts||body))` with a unique index. A duplicate returns 200 and creates no run.
+- **Inbound**: webhook dedup on `(endpoint_id, provider_event_id | sha256(ts||body))` with a unique index. A duplicate returns 200 and creates no run. **That index must live on an unpartitioned table** — see the correction in [§4.5](#45-triggers-and-webhook-endpoints). A unique index on a partitioned table has to include the partition key, and a `received_at` that defaults to `now()` makes the constraint vacuous: the same key arriving a minute later is a different row, which is precisely the case replay protection exists to catch.
 - **Queue**: BullMQ `deduplication: { id: run_id }` in simple mode, which holds "as long as the job is in a non-finished state" ([docs](https://docs.bullmq.io/guide/jobs/deduplication)). Belt-and-braces on top of the DB lease guard, not instead of it.
 - **Outbound**: connectors that support it get an `Idempotency-Key` header per `draft-ietf-httpapi-idempotency-key-header-07` (Standards Track, published 15 Oct 2025 — [IETF](https://www.ietf.org/archive/id/draft-ietf-httpapi-idempotency-key-header-07.html)). Note the draft's own semantics: **409 Conflict** if the same key arrives while the original is in flight, **422** if the same key arrives with a *different* payload. Our connector interface exposes `supportsIdempotency: boolean`; connectors that don't get a different strategy (below).
 - **Connectors without idempotency support** — Google Sheets `values.append`, SMTP send — declare `atMostOnce: true`. For these the engine writes an *intent record* to Postgres before the call and marks it after, and on a retry where the intent exists but is unmarked it **pauses the run and asks the user** rather than silently duplicating. This is the honest answer. Zapier, Make and n8n all just retry and let you double-send.
@@ -785,7 +785,7 @@ CREATE TABLE webhook_endpoints (
   rotated_at        timestamptz
 );
 
--- replay protection; partitioned daily because it is high-volume and short-lived
+-- Replay protection. NOT partitioned — see the warning below.
 CREATE TABLE webhook_deliveries (
   endpoint_id  uuid NOT NULL,
   dedup_key    text NOT NULL,
@@ -793,9 +793,40 @@ CREATE TABLE webhook_deliveries (
   received_at  timestamptz NOT NULL DEFAULT now(),
   run_id       uuid,
   status       text NOT NULL,     -- 'accepted','duplicate','rejected_signature','rejected_size'
-  PRIMARY KEY (received_at, endpoint_id, dedup_key)
-) PARTITION BY RANGE (received_at);
+  PRIMARY KEY (endpoint_id, dedup_key)
+);
+
+CREATE INDEX webhook_deliveries_sweep ON webhook_deliveries (received_at);
 ```
+
+> **Correction, 2026-08-27.** An earlier version of this document partitioned
+> this table by `received_at` and used `PRIMARY KEY (received_at, endpoint_id,
+> dedup_key)`. **That provides no replay protection whatsoever**, and the
+> failure is silent.
+>
+> A unique or primary key on a partitioned table must contain every partition
+> key column, so `received_at` has to be in it. But `received_at` defaults to
+> `now()`, so every insert produces a distinct key. A webhook replayed five
+> minutes later — or five milliseconds later — gets a different `received_at`
+> and inserts happily. The constraint rejects only two deliveries landing in
+> the same microsecond, which is not a thing that happens and is not what
+> replay protection is for.
+>
+> This was found in `automa-durable-runner`, where the identical pattern on
+> `runs` was proved vacuous by a test: six rows shared one idempotency key. It
+> matters more here, because on `runs` it is a correctness bug and on this
+> table it is a **security control** — the thing standing between an attacker
+> and replaying a captured, validly-signed request.
+>
+> **The rule: a uniqueness guarantee cannot live on a partitioned table unless
+> the partition key is part of what makes the row unique.** It is not, here.
+> So this table is not partitioned, and retention is a `DELETE` by
+> `received_at` on the janitor's sweep rather than a partition detach. That
+> table stays small — rows only need to outlive the replay window, which is
+> minutes to hours, not the 90 days of run history — so the cheaper deletion
+> strategy partitioning would have bought is not needed.
+>
+> The same correction applies to `runs.idempotency_key` in §4.6.
 
 ### 4.6 Runs, step executions, logs — the tables that will kill the database
 
@@ -848,8 +879,21 @@ CREATE INDEX ON runs (org_id, started_at DESC);
 CREATE INDEX ON runs (org_id, flow_id, started_at DESC);
 CREATE INDEX ON runs (org_id, status, started_at DESC) WHERE status IN ('queued','running','sleeping');
 CREATE INDEX ON runs (wake_at) WHERE status = 'sleeping';
-CREATE UNIQUE INDEX ON runs (started_at, org_id, flow_id, idempotency_key)
-  WHERE idempotency_key IS NOT NULL;
+-- Trigger dedup does NOT live here. See the warning below.
+-- runs.idempotency_key remains as a record of which key produced the run.
+
+-- A separate, unpartitioned table, where a primary key means what it says:
+CREATE TABLE run_idempotency (
+  org_id          uuid        NOT NULL,
+  flow_id         uuid        NOT NULL,
+  idempotency_key text        NOT NULL,
+  run_id          uuid        NOT NULL,
+  run_started_at  timestamptz(3) NOT NULL,   -- both columns, because reaching a
+                                             -- partitioned table needs its key
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (org_id, flow_id, idempotency_key)
+);
+CREATE INDEX run_idempotency_sweep ON run_idempotency (created_at);
 
 CREATE TABLE step_executions (
   id                uuid NOT NULL DEFAULT uuidv7(),
@@ -902,6 +946,45 @@ CREATE INDEX step_exec_stuck ON step_executions (lease_expires_at)
 CREATE INDEX step_exec_retry ON step_executions (next_attempt_at)
   WHERE status = 'failed' AND next_attempt_at IS NOT NULL;
 ```
+
+> **Correction, 2026-08-27.** This document previously specified trigger dedup
+> as a partial unique index on `runs`:
+>
+> ```sql
+> CREATE UNIQUE INDEX ON runs (started_at, org_id, flow_id, idempotency_key)
+>   WHERE idempotency_key IS NOT NULL;
+> ```
+>
+> **It guarantees nothing.** A unique index on a partitioned table must include
+> every partition key column, so `started_at` has to be there — and it defaults
+> to `now()`, so every insert produces a distinct key. It rejects only rows
+> landing in the same microsecond. It reads as a uniqueness constraint, passes
+> review, and prevents no duplicates at all.
+>
+> Found in `automa-durable-runner` by a test that expected a second insert to be
+> rejected; six rows ended up sharing one key. The identical flaw was in
+> `webhook_deliveries` (§4.5), where it is a security control rather than a
+> correctness one.
+>
+> **The rule to carry forward: a uniqueness guarantee cannot live on a
+> partitioned table unless the partition key is genuinely part of what makes the
+> row unique.** For a dedup key it never is — the whole point is that the same
+> key arriving at a *different* time must be rejected.
+>
+> Note the deliberate asymmetry with the `step_executions` index above, which
+> *does* include the partition key and *is* meaningful. `run_started_at` is
+> copied from the parent run rather than defaulted per row, so every step of a
+> run shares one value and `(run_started_at, run_id, node_id, iteration_index)`
+> identifies a step exactly. That is the test to apply before trusting any
+> unique index on a partitioned table: is the partition key *inherited*, or is
+> it `now()`?
+>
+> One further consequence, also learned the hard way: declare partition-key
+> timestamps as `timestamptz(3)`. A JavaScript `Date` holds milliseconds and
+> `timestamptz` holds microseconds, so a value round-tripped through the
+> application no longer matches the row it came from — and any denormalised copy
+> of it silently disagrees with its source in the sub-millisecond digits, which
+> breaks exactly the partition-local joins the denormalisation exists to enable.
 
 **On `run_logs`.** Do not create one. A per-step structured log table is the single fastest way to destroy this database — it is the highest-cardinality, lowest-value, highest-write-amplification table in the design, and nobody queries it relationally. Application logs go to stdout → the log aggregator, correlated by `run_id`/`step_execution_id`. What users see in the UI as "logs" is `step_executions` (status, timings, input, output, error) plus an optional `messages jsonb[]` array on the step row, capped at 50 entries and 8 KB total. Windmill does effectively this — a 5,000-character per-job database buffer, with anything beyond streaming to object storage ([docs](https://www.windmill.dev/docs/core_concepts/jobs)).
 
