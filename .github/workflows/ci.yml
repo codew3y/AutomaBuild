@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.18', '24']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  # The graph and store logic is testable without a browser, but the app still
+  # has to compile and bundle. A build that fails is a demo that is not
+  # deployable, and the definition of shipped requires a clickable URL.
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm run build
+      - name: check the bundle actually contains the app
+        run: |
+          asset=$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' dist/index.html | head -1)
+          test -n "$asset" || { echo "::error::no JS asset referenced from index.html"; exit 1; }
+          for needle in would_create_cycle non_ancestor_reference; do
+            grep -q "$needle" "dist/$asset" || {
+              echo "::error::built bundle is missing $needle — the app compiled without its logic"
+              exit 1
+            }
+          done
+          echo "bundle contains the graph logic"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist

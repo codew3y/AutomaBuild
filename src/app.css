@@ -1,0 +1,171 @@
+/* Desktop only, and the README says so. A flow canvas on a phone is a
+   different product, not a responsive version of this one. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #0f172a;
+  --muted: #64748b;
+  --line: #e2e8f0;
+  --panel: #f8fafc;
+  --error: #b3261e;
+  --warn: #9a6700;
+  --ok: #1a7f37;
+  --accent: #0ea5e9;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1120;
+    --fg: #e2e8f0;
+    --muted: #94a3b8;
+    --line: #1e293b;
+    --panel: #0f172a;
+    --error: #f87171;
+    --warn: #fbbf24;
+    --ok: #4ade80;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; margin: 0; }
+
+body {
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.editor { display: flex; flex-direction: column; height: 100%; }
+
+/* ------------------------------------------------------------- toolbar */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .55rem .9rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  flex: 0 0 auto;
+}
+
+.toolbar .spacer { flex: 1; }
+
+.palette { display: flex; gap: .3rem; margin-left: .6rem; }
+
+button {
+  font: inherit;
+  font-size: .85rem;
+  padding: .3rem .65rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+button.publish { border-color: var(--ok); color: var(--ok); font-weight: 600; }
+button.publish:disabled { border-color: var(--line); color: var(--muted); }
+
+/* Three states, visibly different at a glance rather than three shades of
+   grey — the point of the indicator is to be readable peripherally. */
+.save { font-size: .8rem; padding: .25rem .5rem; border-radius: .3rem; }
+.save-saved { color: var(--ok); }
+.save-saving { color: var(--muted); }
+.save-unsaved { color: var(--warn); font-weight: 600; }
+
+.restored {
+  padding: .4rem .9rem;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-bottom: 1px solid var(--line);
+  font-size: .85rem;
+}
+
+/* ----------------------------------------------------------- workspace */
+
+.workspace { display: flex; flex: 1; min-height: 0; }
+.workspace .react-flow { flex: 1; }
+
+.panel {
+  width: 22rem;
+  flex: 0 0 22rem;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  overflow-y: auto;
+}
+
+.panel-section { padding: .9rem; border-bottom: 1px solid var(--line); }
+.panel-section h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 .6rem; }
+
+.muted { color: var(--muted); font-size: .85rem; }
+
+.count { display: inline-block; min-width: 1.2em; text-align: center; border-radius: 1em; padding: 0 .35em; font-size: .75rem; margin-left: .25rem; }
+.count-error { background: var(--error); color: #fff; }
+.count-warn { background: var(--warn); color: #fff; }
+
+.issues { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
+.issue button {
+  width: 100%;
+  text-align: left;
+  font-size: .82rem;
+  line-height: 1.35;
+  border-left-width: 3px;
+  white-space: normal;
+}
+.issue-error button { border-left-color: var(--error); }
+.issue-warning button { border-left-color: var(--warn); }
+
+.field { display: flex; flex-direction: column; gap: .2rem; margin-bottom: .6rem; }
+.field span { font-size: .78rem; color: var(--muted); }
+.field input {
+  font: inherit;
+  font-size: .85rem;
+  padding: .35rem .5rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+.field input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* ---------------------------------------------------------------- node */
+
+.step-node {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  min-width: 11rem;
+  padding: .5rem .7rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: .45rem;
+  background: var(--bg);
+  box-shadow: 0 1px 2px rgb(0 0 0 / .06);
+}
+.step-node[data-selected='true'] { outline: 2px solid var(--accent); outline-offset: 1px; }
+.step-node[data-error='true'] { border-color: var(--error); }
+
+.step-glyph { color: var(--accent); font-size: 1rem; width: 1.1rem; text-align: center; }
+.step-body { display: flex; flex-direction: column; line-height: 1.25; }
+.step-label { font-weight: 600; font-size: .85rem; }
+.step-kind { font-size: .72rem; color: var(--muted); }
+
+.step-badge {
+  margin-left: auto;
+  background: var(--error);
+  color: #fff;
+  font-size: .7rem;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 1rem;
+  display: grid;
+  place-items: center;
+}
+
+/* React Flow paints handles small by default; a webhook editor is a
+   drag-heavy interface and a 6px target is genuinely hard to hit. */
+.react-flow__handle { width: 9px; height: 9px; }
