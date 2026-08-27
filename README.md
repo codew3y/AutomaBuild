@@ -43,44 +43,126 @@ Docker and Node 22.18+ (or 24) are the only requirements.
 ```bash
 cd app
 npm install
-npm run db:up          # two Postgres containers
+npm run db:up          # two Postgres containers and a mail catcher
 npm run db:migrate     # each library's own migrations, each to its own database
-WEBHOOK_SECRETS=whsec_demo_secret npm start
+
+export WEBHOOK_SECRETS=whsec_demo_secret
+export SMTP_HOST=127.0.0.1 SMTP_PORT=1025
+export SMTP_FROM="AutomaBuild <flows@automabuild.test>"
+npm start
 ```
 
-Then open <http://localhost:8080>. The editor is on the left, the run history
-under **History**.
+Then open <http://localhost:8080>. Build a flow under **Builder**, read what ran
+under **History**, and see what the email steps produced at
+<http://localhost:8025>.
 
 To see the whole path exercised and asserted:
 
 ```bash
-WEBHOOK_SECRETS=whsec_demo_secret npm run demo
+npm run demo
 ```
 
-which sends a forged delivery, a stale one, a genuine one, and then the genuine
-one again, and fails the process if any of the four does not behave:
+which publishes a flow, sends a forged delivery, a stale one, a genuine one, and
+then the genuine one again, and fails the process if any part misbehaves:
 
 ```
+0. Published the demo flow: trigger → http → transform → email.
+
 1. A forged signature is rejected, and says nothing about why.
    401 {"error":"rejected_signature"}
 
 2. A correctly signed but stale delivery is rejected too.
    400 {"error":"rejected_timestamp"}
 
-3. A genuine delivery (evt_2e047369-920) starts a durable run.
-   200 {"ok":true,"duplicate":false}
-   run 01a04253-0283-7e49-8c4f-91e14f872104 — succeeded
-     succeeded    trigger 12ms
-     succeeded    lookup 1752ms
-     succeeded    record 459ms
+3. A genuine delivery (evt_30afbbe2-b96) starts a durable run.
+   run 01a04287-… — succeeded
+     succeeded    trigger 7ms
+     succeeded    lookup 539ms
+     succeeded    shape 6ms
+     succeeded    notify 370ms
 
 4. The same delivery again — no second run.
-   200 {"ok":true,"duplicate":true}
-   runs before 4, after 4
+   runs before 9, after 9
 
-5. The mapped URL resolved against real upstream output.
-   record succeeded, so {{ steps.lookup.output.body.full_name }} resolved.
+5. The transform combined two sources, keeping types.
+   {"repo":"nodejs/node","stars":119635,"amount":4200}
+
+6. A real email was composed and accepted by an SMTP server.
+   To:      finance@example.test
+   Subject: Invoice paid — nodejs/node
+   | Repository: nodejs/node
+   | Stars:      119635
+   | Amount:     4200 chf
+
+7. Publishing a new version does not disturb the runs already done.
+   cf3a16b9 → 2c4d7c6e
+   run 01a04287 still renders against its own version
+
+8. A flow that does not compile is refused, with every problem listed.
+   422 ["An email step needs a body."]
 ```
+
+### Sending real email
+
+The email step sends over SMTP, so it works against anything that speaks it.
+`docker compose` starts [Mailpit](https://mailpit.axllent.org/), which accepts
+every message and delivers none — that is what the commands above use, and
+nothing reaches a real inbox.
+
+To send for real, point it at a relay:
+
+```bash
+export SMTP_HOST=smtp.example.com SMTP_PORT=587
+export SMTP_USER=... SMTP_PASSWORD=...
+export SMTP_FROM="Your Name <you@example.com>"
+export SMTP_ALLOWED_RECIPIENTS="@yourcompany.com"
+```
+
+Set `SMTP_ALLOWED_RECIPIENTS` at the same time, not afterwards. A flow's
+recipient comes from a user, and in a system where a webhook body can reach the
+To field, an unrestricted relay is an open relay with extra steps. The list
+matches whole addresses or whole domains, never substrings — otherwise
+`@example.com` would permit `someone@example.com.evil.test`.
+
+Without `SMTP_HOST` the email step reports itself unconfigured rather than
+failing as though the feature were missing.
+
+## The four step kinds
+
+| Kind | What it does |
+|---|---|
+| **Trigger** | Publishes the payload that started the run, so later steps can refer to it as `{{ trigger.body.… }}`. |
+| **HTTP** | Calls an API through `automa-safe-fetch`. A JSON response comes back as data, so `{{ steps.x.output.body.field }}` resolves. |
+| **Transform** | Reshapes data. A JSON template whose string values hold references — renaming fields, picking a subset, combining sources, supplying defaults. It makes no external call. |
+| **Email** | Sends over SMTP. |
+
+A transform is deliberately not an expression language. User-supplied code in a
+workflow engine is a sandbox problem, and a sandbox is a much larger thing to
+get right than a template. What it does get right is types: it parses the
+template *before* resolving references, so `{"stars": "{{ … }}"}` yields the
+number `119635` rather than the string `"119635"`. Resolving first would
+substitute into the text of the document and make every value a string, and a
+later step comparing numbers would be comparing text.
+
+## Publishing
+
+The editor's Publish button has three states, because there are three:
+
+| | |
+|---|---|
+| Nothing published | `Publish` |
+| Published, no edits | `✓ Published` — a status, not a button |
+| Published, edited | `Publish changes` · `Discard` |
+
+Every publish **inserts** a new version rather than updating one. A run records
+the `flowVersionId` it started on and the worker resolves the definition by that
+id, so a run already in flight keeps finishing against the version it began
+with — publishing never disturbs work in progress, and never needs to drain
+first. Overwriting would rewrite history under a run still using it.
+
+Discard goes through the store's temporal wrapper, so ctrl-Z brings the work
+back. That is why it needs no confirmation dialog, and it is easy to lose by
+"optimising" the reset to bypass the store.
 
 ## What joining them actually took
 
@@ -117,6 +199,19 @@ webhooks under Express does not pay for it — and then listed Fastify as a hard
 dependency, which installed it anyway. It is an optional peer dependency now,
 reachable at `automa-webhook-gate/fastify`.
 
+**A delivery whose handoff failed was lost permanently.** The gate records a
+delivery before handing it off — that ordering is what stops two simultaneous
+copies both being accepted, and is not negotiable. But if the handoff then threw
+(the database blinked, say), the record stood, the caller returned 500, and the
+sender's retry was answered "duplicate". Verified, acknowledged as new, never
+acted on, never offered again. `ReplayStore.release()` unwinds the record on
+failure. The trade is a narrow window where a concurrent replay is treated as
+new, which the engine's run idempotency key closes.
+
+**A run's duration meant two different things.** The history list read it from
+the server, which measures wall clock; the header summed step durations. The
+same run showed two different totals on the same screen.
+
 And one that is not a seam bug but was worth stopping for: a `\b` in a regular
 expression reached disk as a literal backspace byte, so the pattern read
 `/<BS>json<BS>/` and matched nothing. Every tool rendered it as `/json/`,
@@ -152,9 +247,8 @@ went out" is exactly the question the viewer exists to answer.
   refuses a branch rather than guessing. `iterationIndex` exists throughout the
   schema anyway, because retrofitting it later would mean rewriting every
   partition.
-- **`transform` and `email` steps compile, appear in the run, and do nothing.**
-  They warn at startup. A step that silently does nothing is worse than one
-  that is missing.
+- **A `branch` step cannot be published.** The compiler refuses it rather than
+  guessing, and says so with every other problem it found.
 - **The worker runs in the web process.** That is a deployment choice, not a
   design one: `startWorker` takes a pool and a flow, and moving it to its own
   process changes no code.

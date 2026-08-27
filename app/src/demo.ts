@@ -15,8 +15,10 @@ import { createHmac, randomUUID } from 'node:crypto'
 
 import { loadConfig } from './config.ts'
 import { buildServer } from './server.ts'
+import { DEMO_FLOW } from './demo-flow.ts'
 
 const PORT = 8099
+const MAILPIT = process.env.MAILPIT_URL ?? 'http://127.0.0.1:8025'
 
 function stripeSignature(payload: string, secret: string, timestamp: number): string {
   const signed = `${timestamp}.${payload}`
@@ -45,8 +47,14 @@ async function main(): Promise<void> {
   const config = { ...loadConfig(), port: PORT }
   const secret = config.secrets[0]!
 
+  // Checked once, up front: a demo that silently skips the email assertions
+  // because a container is not up would read as a full pass.
+  const mailpit = await mailpitReachable()
+
   const server = await buildServer({ config })
   await server.app.listen({ port: PORT, host: '127.0.0.1' })
+
+  if (mailpit !== null) await fetch(`${MAILPIT}/api/v1/messages`, { method: 'DELETE' })
 
   const base = `http://127.0.0.1:${PORT}`
   const endpoint = `${base}/webhooks/${config.endpointId}`
@@ -55,6 +63,19 @@ async function main(): Promise<void> {
     rule()
     line('  AutomaBuild — the four components, end to end')
     rule()
+    line()
+
+    // --------------------------------------------------------------- publish
+    // Published first, so everything below asserts against a known flow. Without
+    // this the demo would check whatever happened to be live on this machine,
+    // and would pass or fail depending on what someone published last.
+    const seeded = await fetch(`${base}/api/flows/published`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ graph: DEMO_FLOW, publishedBy: 'demo' }),
+    })
+    if (seeded.status !== 201) throw new Error(`could not publish the demo flow (${seeded.status})`)
+    line(`0. Published the demo flow: trigger → http → transform → email.`)
     line()
 
     // ---------------------------------------------------------------- forged
@@ -115,7 +136,13 @@ async function main(): Promise<void> {
       const run = (await response.json()) as {
         id: string
         status: string
-        steps: { nodeId: string; outcome: string; durationMs?: number; attempts?: number }[]
+        steps: {
+          nodeId: string
+          outcome: string
+          durationMs?: number
+          attempts?: number
+          output?: unknown
+        }[]
       }
       return run.status === 'running' ? null : run
     })
@@ -143,26 +170,128 @@ async function main(): Promise<void> {
     if (after !== before) throw new Error(`a duplicate delivery created ${after - before} extra run(s)`)
     line()
 
-    // -------------------------------------------------------------- mapping
-    line('5. The mapped URL resolved against real upstream output.')
-    const record = finished.steps.find((step) => step.nodeId === 'record')
-    if (record === undefined) throw new Error('the mapped step is missing from the run')
-    if (record.outcome !== 'succeeded') {
+    // ------------------------------------------------------------ transform
+    line('5. The transform combined two sources, keeping types.')
+    const shape = finished.steps.find((step) => step.nodeId === 'shape')
+    if (shape === undefined) throw new Error('the transform step is missing from the run')
+    if (shape.outcome !== 'succeeded') {
+      throw new Error(`the transform did not succeed (${shape.outcome})`)
+    }
+
+    const output = shape.output as Record<string, unknown> | undefined
+    line(`   ${JSON.stringify(output)}`)
+
+    if (output?.['repo'] !== 'nodejs/node') {
+      throw new Error('the transform did not resolve its reference to the HTTP step')
+    }
+    if (output?.['amount'] !== 4200) {
+      // Both halves matter: that the webhook payload reached the transform at
+      // all, and that a number came back as a number. Resolving into the text
+      // of the template and parsing afterwards would give the string "4200".
       throw new Error(
-        `the mapped step did not succeed (${record.outcome}). ` +
-          `The URL contains {{ steps.lookup.output.body.full_name }}; if it had not ` +
-          `resolved, the request would have gone out with the braces still in it.`,
+        `expected the number 4200 from the webhook payload, got ${JSON.stringify(output?.['amount'])}`,
       )
     }
-    line(`   ${record.nodeId} succeeded, so {{ steps.lookup.output.body.full_name }} resolved.`)
+    line()
+
+    // ---------------------------------------------------------------- email
+    line('6. A real email was composed and accepted by an SMTP server.')
+    const notify = finished.steps.find((step) => step.nodeId === 'notify')
+    if (notify === undefined) throw new Error('the email step is missing from the run')
+
+    if (mailpit === null) {
+      // Not a failure: the demo is useful without a mail server, and saying
+      // nothing would let a skipped check read as a passing one.
+      line('   skipped — no SMTP server at ' + MAILPIT)
+    } else {
+      if (notify.outcome !== 'succeeded') {
+        throw new Error(`the email step did not succeed (${notify.outcome})`)
+      }
+      const messages = await mailpitMessages()
+      const sent = messages.find((message) => message.Subject.includes('nodejs/node'))
+      if (sent === undefined) {
+        throw new Error('no message with a resolved subject arrived at the mail server')
+      }
+      const full = (await (await fetch(`${MAILPIT}/api/v1/message/${sent.ID}`)).json()) as {
+        Text: string
+        To: { Address: string }[]
+      }
+      line(`   To:      ${full.To[0]?.Address}`)
+      line(`   Subject: ${sent.Subject}`)
+      for (const bodyLine of full.Text.trim().split('\n')) line(`   | ${bodyLine}`)
+      if (!full.Text.includes('4200')) {
+        throw new Error('the email body did not carry the amount from the webhook')
+      }
+    }
+    line()
+
+    // -------------------------------------------------------------- publish
+    line('7. Publishing a new version does not disturb the runs already done.')
+    const beforeVersion = (await (await fetch(`${base}/api/flows/published`)).json()) as {
+      versionId: string
+    }
+
+    const republished = await fetch(`${base}/api/flows/published`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ graph: DEMO_FLOW, publishedBy: 'demo' }),
+    })
+    const newVersion = (await republished.json()) as { versionId?: string }
+    if (republished.status !== 201) throw new Error(`publish failed (${republished.status})`)
+    if (newVersion.versionId === beforeVersion.versionId) {
+      throw new Error('publishing must mint a new version, not overwrite the last one')
+    }
+    line(`   ${beforeVersion.versionId.slice(0, 8)} → ${newVersion.versionId!.slice(0, 8)}`)
+
+    const stillThere = await fetch(`${base}/api/runs/${finished.id}`)
+    const reread = (await stillThere.json()) as { steps: unknown[]; graph: { nodes: unknown[] } }
+    if (reread.graph.nodes.length === 0) {
+      throw new Error('the finished run lost the graph it ran on when a new version was published')
+    }
+    line(`   run ${finished.id.slice(0, 8)} still renders against its own version`)
+    line()
+
+    // ------------------------------------------------------------- refusal
+    line('8. A flow that does not compile is refused, with every problem listed.')
+    const refused = await fetch(`${base}/api/flows/published`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        graph: {
+          nodes: [
+            { id: 't', kind: 'trigger', position: { x: 0, y: 0 } },
+            { id: 'e', kind: 'email', position: { x: 200, y: 0 }, data: { to: 'a@b.test' } },
+          ],
+          edges: [{ id: 't->e', source: 't', target: 'e' }],
+        },
+      }),
+    })
+    const problems = (await refused.json()) as { problems?: { message: string }[] }
+    line(`   ${refused.status} ${JSON.stringify(problems.problems?.map((p) => p.message))}`)
+    if (refused.status !== 422) throw new Error(`expected 422, got ${refused.status}`)
     line()
 
     rule()
-    line('  PASS — verified, de-duplicated, executed durably, mapped, and served.')
+    line('  PASS — verified, de-duplicated, run durably, transformed, sent, published.')
     rule()
   } finally {
     await server.close()
   }
+}
+
+async function mailpitReachable(): Promise<true | null> {
+  try {
+    const response = await fetch(`${MAILPIT}/api/v1/info`, { signal: AbortSignal.timeout(2000) })
+    return response.ok ? true : null
+  } catch {
+    return null
+  }
+}
+
+async function mailpitMessages(): Promise<{ ID: string; Subject: string }[]> {
+  const response = await fetch(`${MAILPIT}/api/v1/messages`)
+  const body = (await response.json()) as { messages: { ID: string; Subject: string }[] }
+  return body.messages
 }
 
 async function countRuns(base: string): Promise<number> {

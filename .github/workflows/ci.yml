@@ -38,6 +38,19 @@ jobs:
       # step runs under `bash -e`, where a failing substitution aborts the
       # script, so a database that is merely not ready yet ends the job on the
       # first attempt instead of being waited for.
+      - name: wait for the mail server
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8025/api/v1/info >/dev/null; then
+              echo ready
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "mailpit did not come up"
+          docker compose logs mailpit --tail 20
+          exit 1
+
       - name: wait for both databases
         run: |
           for _ in $(seq 1 90); do
@@ -54,6 +67,12 @@ jobs:
       - run: npm run db:migrate
         env:
           WEBHOOK_SECRETS: whsec_ci_secret
+          SMTP_HOST: 127.0.0.1
+          SMTP_PORT: "1025"
+          SMTP_FROM: AutomaBuild <flows@automabuild.test>
+          # Nothing may leave the runner even if the host were misconfigured.
+          # .test is reserved by RFC 2606 and can never be a real domain.
+          SMTP_ALLOWED_RECIPIENTS: "@example.test"
 
       # The demo is the deliverable, so it runs here rather than being a thing
       # that worked once on somebody's laptop. It fails the build if a forgery
@@ -62,6 +81,12 @@ jobs:
       - run: npm run demo
         env:
           WEBHOOK_SECRETS: whsec_ci_secret
+          SMTP_HOST: 127.0.0.1
+          SMTP_PORT: "1025"
+          SMTP_FROM: AutomaBuild <flows@automabuild.test>
+          # Nothing may leave the runner even if the host were misconfigured.
+          # .test is reserved by RFC 2606 and can never be a real domain.
+          SMTP_ALLOWED_RECIPIENTS: "@example.test"
 
       - name: logs on failure
         if: failure()
