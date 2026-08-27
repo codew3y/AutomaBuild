@@ -23,7 +23,8 @@
     "db:reset": "docker compose down -v && docker compose up -d",
     "demo:chaos": "node scripts/demo-chaos.ts",
     "cli": "node src/cli.ts",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
