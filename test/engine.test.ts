@@ -23,6 +23,8 @@ import {
   requestCancel,
 } from '../src/engine/repository.ts'
 import { drainQueue, drainUntilQuiet, advanceClock } from '../src/engine/drain.ts'
+import { runStep } from '../src/engine/executor.ts'
+import { claimStep, recordSuccess } from '../src/engine/repository.ts'
 import { sweep } from '../src/engine/janitor.ts'
 import { noopHandler, scriptedHandler, type StepContext } from '../src/engine/handlers.ts'
 import type { ExecutorDeps } from '../src/engine/executor.ts'
@@ -340,6 +342,124 @@ describe('engine', { skip: SKIP }, () => {
 
       const steps = await listSteps(pool, run)
       assert.equal(steps.filter((s) => s.status === 'pending').length, 2)
+      assert.equal(
+        finished?.cancelledAtStepId,
+        'two',
+        'a cancelled run must record where it stopped, not just that it stopped',
+      )
+    })
+  })
+
+  describe('concurrency limits', () => {
+    it('queues a step rather than failing it when the tenant is at its ceiling', async () => {
+      // The matrix row. A busy system must defer work, not fail it: failing
+      // would spend the step's attempt budget on the fact that we were busy.
+      const flow = makeFlow([{ id: 'only', kind: 'noop', idempotent: true }])
+      const executorDeps: ExecutorDeps = {
+        ...deps(flow, { noop: noopHandler }),
+        limits: { perTenant: 1 },
+        blockedRetryMs: 50,
+      }
+
+      const run = await start(flow)
+      await drainQueue(pool, executorDeps, { tenantId, maxJobs: 1 })
+      const [step] = await listSteps(pool, run)
+
+      // Occupy the tenant's only slot with a live lease held by someone else.
+      const blocker = await start(makeFlow([{ id: 'hog', kind: 'noop', idempotent: true }]))
+      const [blockerStep] = await listSteps(pool, blocker)
+      const held = await withTransaction(pool, (tx) =>
+        claimStep(tx, {
+          runStartedAt: blocker.startedAt,
+          stepId: blockerStep!.id,
+          workerId: 'hog-worker',
+          leaseMs: 60_000,
+        }),
+      )
+      assert.equal(held.kind, 'claimed')
+
+      const outcome = await runStep(
+        pool,
+        { runId: run.id, runStartedAt: run.startedAt, stepId: step!.id, tenantId },
+        executorDeps,
+      )
+
+      assert.equal(outcome.kind, 'deferred')
+      assert.equal(outcome.scope, 'tenant')
+
+      const [after] = await listSteps(pool, run)
+      assert.equal(after?.status, 'pending', 'a deferred step must stay runnable')
+      assert.equal(after?.attemptsStarted, 0, 'being busy is not an attempt')
+      assert.equal(after?.attemptsConsumed, 0, 'being busy must not spend the budget')
+    })
+
+    it('runs the step once the slot frees up', async () => {
+      const flow = makeFlow([{ id: 'patient', kind: 'noop', idempotent: true }])
+      const executorDeps: ExecutorDeps = {
+        ...deps(flow, { noop: noopHandler }),
+        limits: { perTenant: 1 },
+        blockedRetryMs: 20,
+      }
+
+      const blocker = await start(makeFlow([{ id: 'hog', kind: 'noop', idempotent: true }]))
+      const [blockerStep] = await listSteps(pool, blocker)
+      // A long lease on purpose. drainUntilQuiet advances the clock between
+      // rounds, and that shift applies to leases too — a 60-second lease would
+      // expire under its own time travel and free the slot it is meant to hold.
+      await withTransaction(pool, (tx) =>
+        claimStep(tx, {
+          runStartedAt: blocker.startedAt,
+          stepId: blockerStep!.id,
+          workerId: 'hog-worker',
+          leaseMs: 3_600_000,
+        }),
+      )
+
+      const run = await start(flow)
+      await drainUntilQuiet(pool, executorDeps, { tenantId, maxRounds: 3, advanceEach: 100 })
+      assert.notEqual(
+        (await getRun(pool, run.startedAt, run.id))?.status,
+        'succeeded',
+        'it should be blocked while the slot is held',
+      )
+
+      // Release the slot, then let it through.
+      await withTransaction(pool, (tx) =>
+        recordSuccess(tx, {
+          runStartedAt: blocker.startedAt,
+          stepId: blockerStep!.id,
+          workerId: 'hog-worker',
+          output: null,
+        }),
+      )
+      await drainUntilQuiet(pool, executorDeps, { tenantId, advanceEach: 500 })
+
+      assert.equal((await getRun(pool, run.startedAt, run.id))?.status, 'succeeded')
+    })
+
+    it('does not count a lapsed lease against the limit', async () => {
+      // A crashed worker must not hold a concurrency slot forever.
+      const flow = makeFlow([{ id: 'x', kind: 'noop', idempotent: true }])
+      const executorDeps: ExecutorDeps = {
+        ...deps(flow, { noop: noopHandler }),
+        limits: { perTenant: 1 },
+      }
+
+      const blocker = await start(makeFlow([{ id: 'dead', kind: 'noop', idempotent: true }]))
+      const [blockerStep] = await listSteps(pool, blocker)
+      await withTransaction(pool, (tx) =>
+        claimStep(tx, {
+          runStartedAt: blocker.startedAt,
+          stepId: blockerStep!.id,
+          workerId: 'dead-worker',
+          leaseMs: 1,
+        }),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      const run = await start(flow)
+      await drainUntilQuiet(pool, executorDeps, { tenantId })
+      assert.equal((await getRun(pool, run.startedAt, run.id))?.status, 'succeeded')
     })
   })
 

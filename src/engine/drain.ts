@@ -134,7 +134,12 @@ export async function drainQueue(
       steps.push(
         await runStep(
           pool,
-          { runId, runStartedAt, stepId: message.payload.stepId as string },
+          {
+            runId,
+            runStartedAt,
+            stepId: message.payload.stepId as string,
+            tenantId: (message.payload.tenantId as string | undefined) ?? message.tenantId ?? undefined,
+          },
           deps,
         ),
       )

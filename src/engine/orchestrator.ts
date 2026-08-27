@@ -54,7 +54,14 @@ export async function advanceRun(pool: Pool, ref: RunRef): Promise<AdvanceOutcom
 
     if (run.cancelRequestedAt !== null) {
       // Steps already in flight are allowed to finish; nothing new starts.
-      await setRunStatus(tx, run, 'cancelled')
+      //
+      // Record *where* it stopped. "Cancelled" alone tells whoever asks
+      // nothing useful — they need to know which steps ran and which never
+      // will, and reconstructing that later means guessing from timestamps.
+      const stoppedAt = await nextRunnableStep(tx, run)
+      await setRunStatus(tx, run, 'cancelled', {
+        ...(stoppedAt === null ? {} : { cancelledAtStepId: stoppedAt.nodeId }),
+      })
       return { kind: 'finished', status: 'cancelled' }
     }
 
@@ -78,6 +85,7 @@ export async function advanceRun(pool: Pool, ref: RunRef): Promise<AdvanceOutcom
         runId: run.id,
         runStartedAt: run.startedAt.toISOString(),
         stepId: step.id,
+        tenantId: run.tenantId,
       },
       tenantId: run.tenantId,
     })

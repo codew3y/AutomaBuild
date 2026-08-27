@@ -55,6 +55,7 @@ function runColumns(alias = ''): string {
     'finished_at',
     'deadline_at',
     'cancel_requested_at',
+    'cancelled_at_step_id',
     'step_count',
     'steps_succeeded',
     'steps_failed',
@@ -79,6 +80,7 @@ function toRun(row: Record<string, unknown>): RunRow {
     finishedAt: (row.finished_at as Date | null) ?? null,
     deadlineAt: (row.deadline_at as Date | null) ?? null,
     cancelRequestedAt: (row.cancel_requested_at as Date | null) ?? null,
+    cancelledAtStepId: (row.cancelled_at_step_id as string | null) ?? null,
     stepCount: row.step_count as number,
     stepsSucceeded: row.steps_succeeded as number,
     stepsFailed: row.steps_failed as number,
@@ -194,8 +196,8 @@ async function insertSteps(tx: Executor, run: RunRow, flow: FlowDefinition): Pro
     await tx.query(
       `INSERT INTO step_executions
          (tenant_id, run_id, run_started_at, node_id, iteration_index, topo_order,
-          step_kind, status, idempotency_key, max_attempts)
-       VALUES ($1, $2, $3, $4, 0, $5, $6, 'pending', $7, $8)`,
+          step_kind, status, idempotency_key, max_attempts, flow_id)
+       VALUES ($1, $2, $3, $4, 0, $5, $6, 'pending', $7, $8, $9)`,
       [
         run.tenantId,
         run.id,
@@ -210,6 +212,7 @@ async function insertSteps(tx: Executor, run: RunRow, flow: FlowDefinition): Pro
           attemptGroup: run.attemptGroup,
         }),
         node.maxAttempts ?? 5,
+        run.flowId,
       ],
     )
     order++
@@ -236,7 +239,18 @@ export async function setRunStatus(
   tx: Executor,
   run: { id: string; startedAt: Date },
   status: RunStatus,
-  error?: { errorClass?: string; errorCode?: string; errorStepId?: string },
+  detail?: {
+    errorClass?: string
+    errorCode?: string
+    errorStepId?: string
+    /**
+     * Where a cancelled run actually stopped.
+     *
+     * "Cancelled" on its own is not much use to whoever asks what happened:
+     * they need to know which steps ran and which never will.
+     */
+    cancelledAtStepId?: string
+  },
 ): Promise<void> {
   await tx.query(
     `UPDATE runs
@@ -245,15 +259,17 @@ export async function setRunStatus(
                                THEN now() ELSE finished_at END,
             error_class = COALESCE($4, error_class),
             error_code = COALESCE($5, error_code),
-            error_step_id = COALESCE($6, error_step_id)
+            error_step_id = COALESCE($6, error_step_id),
+            cancelled_at_step_id = COALESCE($7, cancelled_at_step_id)
       WHERE started_at = $1 AND id = $2`,
     [
       run.startedAt,
       run.id,
       status,
-      error?.errorClass ?? null,
-      error?.errorCode ?? null,
-      error?.errorStepId ?? null,
+      detail?.errorClass ?? null,
+      detail?.errorCode ?? null,
+      detail?.errorStepId ?? null,
+      detail?.cancelledAtStepId ?? null,
     ],
   )
 }
@@ -335,12 +351,41 @@ export async function nextRunnableStep(
   return rows.length === 0 ? null : toStep(rows[0]!)
 }
 
+export interface ConcurrencyLimits {
+  /** Concurrent steps this tenant may have in flight. */
+  readonly perTenant?: number
+  /** Concurrent steps one flow may have in flight. 1 serialises the flow. */
+  readonly perFlow?: number
+}
+
 export interface ClaimInput {
   readonly runStartedAt: Date
   readonly stepId: string
   readonly workerId: string
   readonly leaseMs: number
+  /** Required when limits are supplied — the counters are keyed on it. */
+  readonly tenantId?: string
+  readonly flowId?: string
+  readonly limits?: ConcurrencyLimits
 }
+
+/**
+ * Why a claim did not succeed, which the caller must tell apart.
+ *
+ * `taken` means someone else owns the step: stop, do nothing, this delivery
+ * was a duplicate. `blocked` means the step is still ours to run and the
+ * system is merely busy — it must be retried later without counting as a
+ * failure, or a burst of traffic would burn every step's attempt budget.
+ */
+export type ClaimResult =
+  | { readonly kind: 'claimed'; readonly step: StepRow }
+  | { readonly kind: 'taken' }
+  | {
+      readonly kind: 'blocked'
+      readonly scope: 'tenant' | 'flow'
+      readonly running: number
+      readonly limit: number
+    }
 
 /**
  * Claim a step for execution. Returns the claimed row, or null if someone else
@@ -363,7 +408,16 @@ export interface ClaimInput {
  * `attempts_started` increments; `attempts_consumed` does not. Whether an
  * attempt was spent is decided by how it *ends*, not by it beginning.
  */
-export async function claimStep(tx: Executor, input: ClaimInput): Promise<StepRow | null> {
+export async function claimStep(tx: Executor, input: ClaimInput): Promise<ClaimResult> {
+  // Concurrency is checked here, at claim time, never at enqueue time. A step
+  // waiting in the queue consumes nothing; only one actually executing does.
+  // Enforcing at enqueue would mean refusing to schedule work that will be
+  // perfectly fine to run in a second's time.
+  if (input.limits !== undefined) {
+    const blocked = await checkLimits(tx, input)
+    if (blocked !== null) return { kind: 'blocked', scope: blocked.scope, running: blocked.running, limit: blocked.limit }
+  }
+
   const { rows } = await tx.query(
     `UPDATE step_executions
         SET status = 'running',
@@ -381,7 +435,63 @@ export async function claimStep(tx: Executor, input: ClaimInput): Promise<StepRo
       RETURNING ${STEP_COLUMNS}`,
     [input.runStartedAt, input.stepId, input.workerId, input.leaseMs],
   )
-  return rows.length === 0 ? null : toStep(rows[0]!)
+  return rows.length === 0 ? { kind: 'taken' } : { kind: 'claimed', step: toStep(rows[0]!) }
+}
+
+/**
+ * Is this claim over a concurrency ceiling?
+ *
+ * Takes a transaction-scoped advisory lock on the tenant first. Without it,
+ * two workers can both count nine running steps against a limit of ten and
+ * both proceed, because under READ COMMITTED neither sees the other's
+ * uncommitted claim. Serialising the count is cheap — a claim is a
+ * sub-millisecond statement — and the alternative is a limit that is only
+ * approximately a limit, which is the same as not having one.
+ *
+ * Only steps holding a *live* lease count. A lapsed lease means its worker is
+ * gone, and counting it would let one crashed process permanently occupy a
+ * slot no one can use.
+ */
+async function checkLimits(
+  tx: Executor,
+  input: ClaimInput,
+): Promise<{ scope: 'tenant' | 'flow'; running: number; limit: number } | null> {
+  const limits = input.limits!
+  await tx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`claim:${input.tenantId}`])
+
+  if (limits.perTenant !== undefined) {
+    const { rows } = await tx.query<{ running: string }>(
+      `SELECT count(*)::text AS running
+         FROM step_executions
+        WHERE tenant_id = $1
+          AND status = 'running'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at > now()`,
+      [input.tenantId],
+    )
+    const running = Number(rows[0]!.running)
+    if (running >= limits.perTenant) {
+      return { scope: 'tenant', running, limit: limits.perTenant }
+    }
+  }
+
+  if (limits.perFlow !== undefined && input.flowId !== undefined) {
+    const { rows } = await tx.query<{ running: string }>(
+      `SELECT count(*)::text AS running
+         FROM step_executions
+        WHERE flow_id = $1
+          AND status = 'running'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at > now()`,
+      [input.flowId],
+    )
+    const running = Number(rows[0]!.running)
+    if (running >= limits.perFlow) {
+      return { scope: 'flow', running, limit: limits.perFlow }
+    }
+  }
+
+  return null
 }
 
 /**

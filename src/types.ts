@@ -69,6 +69,7 @@ export interface RunRow {
   readonly finishedAt: Date | null
   readonly deadlineAt: Date | null
   readonly cancelRequestedAt: Date | null
+  readonly cancelledAtStepId: string | null
   readonly stepCount: number
   readonly stepsSucceeded: number
   readonly stepsFailed: number

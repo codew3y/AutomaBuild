@@ -152,10 +152,10 @@ describe('repository', { skip: SKIP }, () => {
         )
 
       const [a, b] = await Promise.all([claim('worker-a'), claim('worker-b')])
-      const winners = [a, b].filter((result) => result !== null)
+      const winners = [a, b].filter((result) => result.kind === 'claimed')
 
       assert.equal(winners.length, 1, 'both workers claimed the same step')
-      assert.equal(winners[0]?.attemptsStarted, 1, 'the loser must not have counted an attempt')
+      assert.equal(winners[0]?.step.attemptsStarted, 1, 'the loser must not have counted an attempt')
     })
 
     it('holds under ten simultaneous claims', async () => {
@@ -175,7 +175,7 @@ describe('repository', { skip: SKIP }, () => {
         ),
       )
 
-      assert.equal(claims.filter((c) => c !== null).length, 1)
+      assert.equal(claims.filter((c) => c.kind === 'claimed').length, 1)
       const after = await listSteps(pool, run)
       assert.equal(after[0]?.attemptsStarted, 1, 'losing claims incremented the attempt counter')
     })
@@ -188,8 +188,8 @@ describe('repository', { skip: SKIP }, () => {
           claimStep(tx, { runStartedAt: run.startedAt, stepId: step!.id, workerId, leaseMs }),
         )
 
-      assert.ok(await claim('worker-a', 60_000))
-      assert.equal(await claim('worker-b', 60_000), null)
+      assert.equal((await claim('worker-a', 60_000)).kind, 'claimed')
+      assert.equal((await claim('worker-b', 60_000)).kind, 'taken')
     })
 
     it('lets another worker take over once the lease expires', async () => {
@@ -203,13 +203,13 @@ describe('repository', { skip: SKIP }, () => {
         )
 
       const first = await claim('worker-a', 1)
-      assert.ok(first)
+      assert.equal(first.kind, 'claimed')
       await new Promise((resolve) => setTimeout(resolve, 40))
 
       const second = await claim('worker-b', 60_000)
-      assert.ok(second, 'an expired lease should be reclaimable')
-      assert.equal(second.workerId, 'worker-b')
-      assert.equal(second.attemptsStarted, 2, 'the retake is a second attempt')
+      assert.equal(second.kind, 'claimed', 'an expired lease should be reclaimable')
+      assert.equal(second.step.workerId, 'worker-b')
+      assert.equal(second.step.attemptsStarted, 2, 'the retake is a second attempt')
     })
 
     it('only renews a lease for the worker that holds it', async () => {

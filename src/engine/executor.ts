@@ -20,6 +20,7 @@ import { onAttemptFailed, type StepRetryState } from '../retry.ts'
 import { systemRandom, type Random } from '../random.ts'
 import { DEFAULT_TIMEOUTS, type TimeoutConfig } from '../timeouts.ts'
 import {
+  type ConcurrencyLimits,
   claimStep,
   enqueue,
   getRun,
@@ -38,10 +39,21 @@ export interface ExecutorDeps {
   readonly random?: Random
   readonly backoff?: BackoffPolicy
   readonly timeouts?: TimeoutConfig
+  /** Enforced at claim time. Omit for no limits. */
+  readonly limits?: ConcurrencyLimits
+  /** How long a blocked step waits before trying to claim again. */
+  readonly blockedRetryMs?: number
 }
 
 export type StepOutcome =
   | { readonly kind: 'not_claimed' }
+  | {
+      readonly kind: 'deferred'
+      readonly stepId: string
+      readonly scope: 'tenant' | 'flow'
+      readonly running: number
+      readonly limit: number
+    }
   | { readonly kind: 'succeeded'; readonly stepId: string }
   | { readonly kind: 'retry_scheduled'; readonly stepId: string; readonly delayMs: number }
   | { readonly kind: 'dead_lettered'; readonly stepId: string; readonly reason: string }
@@ -52,6 +64,8 @@ export interface RunStepInput {
   readonly runId: string
   readonly runStartedAt: Date
   readonly stepId: string
+  /** Needed to count concurrency and to tag the messages this produces. */
+  readonly tenantId?: string
 }
 
 export async function runStep(
@@ -63,17 +77,49 @@ export async function runStep(
   const policy = deps.backoff ?? DEFAULT_BACKOFF
   const random = deps.random ?? systemRandom
 
-  // 1. Claim. If someone else holds it, this delivery was a duplicate and the
-  //    correct behaviour is to do nothing at all.
-  const claimed = await withTransaction(pool, (tx) =>
+  // 1. Claim. Three outcomes, and telling them apart matters.
+  const result = await withTransaction(pool, (tx) =>
     claimStep(tx, {
       runStartedAt: input.runStartedAt,
       stepId: input.stepId,
       workerId: deps.workerId,
       leaseMs: timeouts.stepAttemptMs * 2,
+      tenantId: input.tenantId,
+      flowId: deps.flow.id,
+      ...(deps.limits === undefined ? {} : { limits: deps.limits }),
     }),
   )
-  if (claimed === null) return { kind: 'not_claimed' }
+
+  // Someone else owns it: this delivery was a duplicate. Do nothing at all.
+  if (result.kind === 'taken') return { kind: 'not_claimed' }
+
+  if (result.kind === 'blocked') {
+    // At a concurrency ceiling. The step is still ours to run and nothing has
+    // failed — the system is busy. Put it back with a delay and do not touch
+    // the attempt counters, or a traffic spike would exhaust every step's
+    // retry budget without a single real error having occurred.
+    await withTransaction(pool, (tx) =>
+      enqueue(tx, {
+        topic: 'run_step',
+        payload: {
+          runId: input.runId,
+          runStartedAt: input.runStartedAt.toISOString(),
+          stepId: input.stepId,
+        },
+        tenantId: input.tenantId,
+        delayMs: deps.blockedRetryMs ?? 250,
+      }),
+    )
+    return {
+      kind: 'deferred',
+      stepId: input.stepId,
+      scope: result.scope,
+      running: result.running,
+      limit: result.limit,
+    }
+  }
+
+  const claimed = result.step
 
   const context = await buildContext(pool, claimed, deps, timeouts)
 

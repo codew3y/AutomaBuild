@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The suite runs TypeScript directly, which needs Node's type
+        # stripping (unflagged from 22.18 and 23.6).
+        node: ['22.18', '24']
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: npm ci
+      - run: npm run typecheck
+
+      # The stack comes up through docker compose rather than a service
+      # container, deliberately. The schema needs pg_partman and pg_cron, which
+      # means a derived image; using compose here means CI exercises the same
+      # one-command path a clean clone takes, instead of a parallel definition
+      # that can drift from it silently.
+      - name: start postgres and redis
+        run: docker compose up -d --build
+
+      - name: wait for postgres
+        run: |
+          for _ in $(seq 1 90); do
+            if docker compose exec -T postgres pg_isready -U automa -d automa >/dev/null 2>&1; then
+              echo "ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "postgres did not become ready"
+          docker compose logs postgres --tail 40
+          exit 1
+
+      - name: verify the extensions are actually loaded
+        run: bash scripts/verify-stack.sh
+
+      - run: npm run db:migrate
+      - run: npm test
+
+      - name: postgres logs on failure
+        if: failure()
+        run: docker compose logs postgres --tail 100
+
+  # The chaos demo is the deliverable, so it runs here rather than being a
+  # thing that worked once on somebody's laptop. It fails the build if a run is
+  # lost or an effect happens twice. It does not fail when the kills never
+  # landed mid-step — that is a demo that exercised nothing, which is a
+  # different problem from a demo that found a bug, and the script says so in
+  # its own output.
+  chaos:
+    name: chaos demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - run: npm ci
+      - run: docker compose up -d --build
+
+      - name: wait for postgres
+        run: |
+          for _ in $(seq 1 90); do
+            if docker compose exec -T postgres pg_isready -U automa -d automa >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose logs postgres --tail 40
+          exit 1
+
+      - run: npm run db:migrate
+      - run: npm run demo:chaos
+        env:
+          CHAOS_RUNS: '20'
+          CHAOS_DURATION_MS: '45000'
+
+      - name: postgres logs on failure
+        if: failure()
+        run: docker compose logs postgres --tail 100
