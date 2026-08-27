@@ -28,7 +28,8 @@ export interface StepNodeData extends Record<string, unknown> {
   readonly durationMs?: number
 }
 
-/** Exported so the MiniMap can colour its rectangles; it cannot see the CSS. */
+/** The single place node colours are defined, so the glyph map below and
+ *  anything else that needs one agree. */
 export const KIND_ACCENT: Record<string, string> = {
   trigger: '#7c3aed',
   http: '#0ea5e9',
