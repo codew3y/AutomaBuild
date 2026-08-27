@@ -7,7 +7,7 @@
  * interesting case is two transactions in flight at the same moment.
  */
 
-import { after, before, describe, it } from 'node:test'
+import { after, before, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import type { Pool } from 'pg'
@@ -86,11 +86,15 @@ describe('repository', { skip: SKIP }, () => {
       )
       assert.ok(steps.every((s) => s.status === 'pending'))
 
-      const outbox = await withTransaction(pool, (tx) => claimOutboxBatch(tx, 100))
-      assert.ok(
-        outbox.some((m) => m.topic === 'advance_run' && m.payload.runId === run.id),
-        'creating a run must schedule it in the same transaction',
+      // Queried directly rather than through claimOutboxBatch: that takes the
+      // oldest N rows across every tenant, so undrained rows from other tests
+      // can push this one out of the window and make the assertion flaky.
+      const { rowCount } = await pool.query(
+        `SELECT 1 FROM outbox
+          WHERE topic = 'advance_run' AND payload->>'runId' = $1`,
+        [run.id],
       )
+      assert.equal(rowCount, 1, 'creating a run must schedule it in the same transaction')
     })
 
     it('gives every step a distinct, stable idempotency key', async () => {
@@ -411,15 +415,25 @@ describe('repository', { skip: SKIP }, () => {
   })
 
   describe('the outbox', () => {
+    // Claims are scoped to a fresh tenant, and the batch is claimed by tenant
+    // rather than globally. Unscoped, claimOutboxBatch takes the oldest N rows
+    // across every tenant, so rows left behind by other tests push the row
+    // under test out of the window and the assertion fails for reasons that
+    // have nothing to do with SKIP LOCKED.
+    let outboxTenant: string
+    beforeEach(() => {
+      outboxTenant = randomUUID()
+    })
+
     it('hands a row to only one of two concurrent relays', async () => {
       const marker = randomUUID()
       await withTransaction(pool, (tx) =>
-        enqueue(tx, { topic: 'advance_run', payload: { marker }, tenantId }),
+        enqueue(tx, { topic: 'advance_run', payload: { marker }, tenantId: outboxTenant }),
       )
 
       const drain = () =>
         withTransaction(pool, async (tx) => {
-          const batch = await claimOutboxBatch(tx, 100)
+          const batch = await claimOutboxBatch(tx, 100, outboxTenant)
           const mine = batch.filter((m) => m.payload.marker === marker)
           await deleteOutbox(tx, mine.map((m) => m.id))
           return mine.length
@@ -435,12 +449,14 @@ describe('repository', { skip: SKIP }, () => {
         enqueue(tx, {
           topic: 'run_step',
           payload: { marker },
-          tenantId,
+          tenantId: outboxTenant,
           delayMs: 60_000,
         }),
       )
 
-      const batch = await withTransaction(pool, (tx) => claimOutboxBatch(tx, 500))
+      const batch = await withTransaction(pool, (tx) =>
+        claimOutboxBatch(tx, 500, outboxTenant),
+      )
       assert.equal(
         batch.filter((m) => m.payload.marker === marker).length,
         0,
