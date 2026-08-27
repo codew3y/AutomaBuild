@@ -15,6 +15,14 @@ export interface StepSchema {
   readonly fields: readonly string[]
   readonly required?: readonly string[]
   readonly label?: string
+  /**
+   * Fields that need a textarea rather than a single line.
+   *
+   * The schema decides, not the input component. Guessing from the field name
+   * works right up until a step has a `body` that is a URL fragment, and then
+   * the guess is wrong in a way nobody can configure their way out of.
+   */
+  readonly multiline?: readonly string[]
 }
 
 export const SCHEMAS: Record<string, StepSchema> = {
@@ -22,7 +30,12 @@ export const SCHEMAS: Record<string, StepSchema> = {
   http: { fields: ['url', 'method'], required: ['url'], label: 'HTTP request' },
   transform: { fields: ['expression'], label: 'Transform' },
   branch: { fields: ['condition'], required: ['condition'], label: 'Branch' },
-  email: { fields: ['to', 'subject'], required: ['to'], label: 'Send email' },
+  email: {
+    fields: ['to', 'subject', 'body'],
+    required: ['to', 'body'],
+    label: 'Send email',
+    multiline: ['body'],
+  },
 }
 
 export const SAMPLE_FLOW: FlowGraph = {
@@ -30,8 +43,8 @@ export const SAMPLE_FLOW: FlowGraph = {
     { id: 'trigger', kind: 'trigger', position: { x: 0, y: 160 }, data: { label: 'Webhook received', event: 'invoice.paid' } },
     { id: 'fetch', kind: 'http', position: { x: 220, y: 160 }, data: { label: 'Fetch customer', url: 'https://api.example.com/customers/1', method: 'GET' } },
     { id: 'check', kind: 'branch', position: { x: 460, y: 160 }, data: { label: 'Is premium?', condition: '{{ steps.fetch.output.tier }} = "premium"' } },
-    { id: 'thanks', kind: 'email', position: { x: 700, y: 60 }, data: { label: 'Thank-you email', to: '{{ steps.fetch.output.email }}', subject: 'Thanks!' } },
-    { id: 'notify', kind: 'email', position: { x: 700, y: 280 }, data: { label: 'Notify sales', to: '{{ steps.thanks.output.messageId }}', subject: 'New signup' } },
+    { id: 'thanks', kind: 'email', position: { x: 700, y: 60 }, data: { label: 'Thank-you email', to: '{{ steps.fetch.output.email }}', subject: 'Thanks!', body: `Hi {{ steps.fetch.output.name }},\n\nThanks for upgrading — your premium features are live.` } },
+    { id: 'notify', kind: 'email', position: { x: 700, y: 280 }, data: { label: 'Notify sales', to: '{{ steps.thanks.output.messageId }}', subject: 'New signup', body: 'A new signup came through: {{ steps.fetch.output.email }}' } },
   ],
   edges: [
     { id: 'trigger->fetch', source: 'trigger', target: 'fetch' },

@@ -28,6 +28,7 @@ import {
   type Node,
   type NodeChange,
   type IsValidConnection,
+  useReactFlow,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 
@@ -39,7 +40,8 @@ import { canPublish, issuesByNode, validate, type ValidationIssue } from './core
 import { createAutosave, type SaveState } from './core/patch.ts'
 import { outputTree, referenceFor, resolveTemplate } from './core/resolve.ts'
 import { buildRunView, summarise, type RunRecord } from './core/run.ts'
-import { nodeTypes } from './components/StepNode.tsx'
+import { describeRun, relativeTime, sortHistory, type RunListing } from './core/history.ts'
+import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
 import { SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
 
@@ -47,6 +49,149 @@ const graphStore = createGraphStore({ initial: SAMPLE_FLOW })
 const editorStore = createEditorStore()
 
 const DRAFT_KEY = 'automa-flow-canvas:draft'
+
+/** What each kind is for, in the words someone building a flow would use. */
+const KIND_BLURB: Record<string, string> = {
+  http: 'Call an API',
+  transform: 'Reshape the data',
+  branch: 'Take one path or the other',
+  email: 'Send a message',
+}
+
+const KIND_GLYPH: Record<string, string> = {
+  http: '↗',
+  transform: 'ƒ',
+  branch: '⑂',
+  email: '✉',
+}
+
+/**
+ * Run history, in the left panel where the step library sits while building.
+ *
+ * The list is listings, not runs: picking one is what fetches its step log.
+ * That is the difference between a history that stays usable at ten thousand
+ * runs and one that downloads all of them to render a sidebar.
+ */
+function RunHistory({
+  history,
+  currentId,
+  onPick,
+  loading,
+  live,
+  now,
+}: {
+  readonly history: readonly RunListing[]
+  readonly currentId: string
+  readonly onPick: (id: string) => void
+  readonly loading: boolean
+  readonly live: boolean
+  readonly now: number
+}) {
+  return (
+    <aside className="library history">
+      <div className="library-head">
+        <h2>Runs</h2>
+        <p className="muted">
+          {live ? `${history.length} from the engine` : 'Sample run — no engine connected'}
+        </p>
+      </div>
+
+      <ul className="library-list">
+        {history.map((entry) => (
+          <li key={entry.id}>
+            <button
+              className={entry.id === currentId ? 'run-row active' : 'run-row'}
+              onClick={() => onPick(entry.id)}
+              disabled={loading && entry.id === currentId}
+            >
+              <span className="run-row-top">
+                <span className={`run-status status-${entry.status}`}>
+                  {entry.status === 'succeeded'
+                    ? '✓'
+                    : entry.status === 'failed'
+                      ? '✕'
+                      : entry.status === 'running'
+                        ? '…'
+                        : '–'}
+                </span>
+                <span className="run-id">{entry.id}</span>
+                <span className="run-when">{relativeTime(entry.startedAt, now)}</span>
+              </span>
+              <span className="run-row-bottom muted">
+                {entry.succeeded} ok
+                {entry.failed > 0 && <> · {entry.failed} failed</>}
+                {entry.notReached > 0 && <> · {entry.notReached} not reached</>}
+                {' · '}
+                {entry.totalMs} ms
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+
+      {history.length === 0 && (
+        <p className="library-foot muted">Nothing has run yet.</p>
+      )}
+    </aside>
+  )
+}
+
+/**
+ * The step library.
+ *
+ * Both gestures do the same thing, deliberately: dragging a card onto the
+ * canvas drops the step where it lands, and clicking it adds one near the
+ * middle. Drag is what the interface looks like it wants, but it is also the
+ * gesture that fails silently on a trackpad someone is not used to, so click
+ * stays as the one that always works.
+ */
+function StepLibrary({
+  onAdd,
+}: {
+  readonly onAdd: (kind: string) => void
+}) {
+  return (
+    <aside className="library">
+      <div className="library-head">
+        <h2>Steps</h2>
+        <p className="muted">Drag onto the canvas, or click to add.</p>
+      </div>
+
+      <ul className="library-list">
+        {STEP_KINDS.map((kind) => (
+          <li key={kind}>
+            <button
+              className="library-card"
+              draggable
+              // The payload is the kind and nothing else; the drop handler owns
+              // where the node goes, because only it knows the viewport.
+              onDragStart={(event) => {
+                event.dataTransfer.setData('application/automabuild-step', kind)
+                event.dataTransfer.effectAllowed = 'move'
+              }}
+              onClick={() => onAdd(kind)}
+              style={{ '--accent': KIND_ACCENT[kind] } as React.CSSProperties}
+              title={`Add a ${kind} step`}
+            >
+              <span className="library-glyph" aria-hidden="true">
+                {KIND_GLYPH[kind] ?? '•'}
+              </span>
+              <span className="library-text">
+                <span className="library-name">{SCHEMAS[kind]?.label ?? kind}</span>
+                <span className="library-blurb">{KIND_BLURB[kind] ?? kind}</span>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+
+      <p className="library-foot muted">
+        A flow starts at its trigger. Connect a step&rsquo;s left edge to the one
+        that should run before it.
+      </p>
+    </aside>
+  )
+}
 
 function Editor() {
   const nodes = useStore(graphStore, (state) => state.nodes)
@@ -57,6 +202,8 @@ function Editor() {
   const [saveState, setSaveState] = useState<SaveState>('saved')
   const [restored, setRestored] = useState(false)
   const [setupOpen, setSetupOpen] = useState(false)
+
+  const { screenToFlowPosition } = useReactFlow()
 
   const canUndo = useStore(graphStore.temporal, (state) => state.pastStates.length > 0)
   const canRedo = useStore(graphStore.temporal, (state) => state.futureStates.length > 0)
@@ -80,23 +227,77 @@ function Editor() {
    */
   const [run, setRun] = useState<RunRecord>(SAMPLE_RUN)
   const [live, setLive] = useState(false)
+  const [history, setHistory] = useState<readonly RunListing[]>([describeRun(SAMPLE_RUN)])
+  const [loadingRun, setLoadingRun] = useState(false)
+
+  // Fixed at mount, so every "4 min ago" in the list is relative to the same
+  // instant. Recomputing per row would let two rows a millisecond apart
+  // disagree about what "now" is.
+  const renderedAt = useRef(Date.now()).current
 
   useEffect(() => {
     let cancelled = false
-    fetch('api/runs/latest')
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data: RunRecord | null) => {
-        if (cancelled || data === null || !Array.isArray(data.steps)) return
-        setRun(data)
-        setLive(true)
+
+    // The listing and the latest run are two requests because they are two
+    // different costs: the list is one cheap query, the run carries its whole
+    // step log. Fetching them together would make opening the page pay for the
+    // step log of a run nobody has asked to see yet — except that the viewer
+    // does open on the latest one, so here it is worth it exactly once.
+    Promise.all([
+      fetch('api/runs')
+        .then((response) => (response.ok ? response.json() : null))
+        .catch(() => null),
+      fetch('api/runs/latest')
+        .then((response) => (response.ok ? response.json() : null))
+        .catch(() => null),
+    ])
+      .then(([listings, latest]: [RunListing[] | null, RunRecord | null]) => {
+        if (cancelled) return
+        // A run without steps is not a run this viewer can render, so it is
+        // treated as no backend rather than as an empty run.
+        if (latest !== null && Array.isArray(latest.steps)) {
+          setRun(latest)
+          setLive(true)
+        }
+        if (Array.isArray(listings) && listings.length > 0) {
+          setHistory(sortHistory(listings))
+          setLive(true)
+        } else if (latest !== null && Array.isArray(latest.steps)) {
+          // A backend that serves the latest run but no listing still gets a
+          // one-row history rather than a list contradicting the canvas.
+          setHistory([describeRun(latest)])
+        }
       })
       .catch(() => {
         // No backend. The sample is the point of the fallback, not an error.
       })
+
     return () => {
       cancelled = true
     }
   }, [])
+
+  const pickRun = useCallback(
+    (id: string) => {
+      if (id === run.id) return
+      setLoadingRun(true)
+      fetch(`api/runs/${encodeURIComponent(id)}`)
+        .then((response) => (response.ok ? response.json() : null))
+        .then((data: RunRecord | null) => {
+          if (data === null || !Array.isArray(data.steps)) return
+          setRun(data)
+          // A run carries the graph it ran on, so selecting one from the
+          // history is also what re-draws the canvas as it was then.
+          editorStore.getState().select(null)
+        })
+        .catch(() => {
+          // Leave the run that is already showing rather than blanking the
+          // canvas; the row stays unselected, which is the visible signal.
+        })
+        .finally(() => setLoadingRun(false))
+    },
+    [run.id],
+  )
 
   const runView = useMemo(() => buildRunView(run), [run])
   const runSummary = useMemo(() => summarise(run), [run])
@@ -192,7 +393,9 @@ function Editor() {
   const rfNodes = useMemo<Node[]>(() => {
     const source = viewing ? run.graph.nodes : nodes
     return source.map((node) => {
-      const run = viewing ? runView.byNode.get(node.id) : undefined
+      // Not named `run`: that shadowed the run being viewed, whose graph the
+      // line above reads.
+      const stepRun = viewing ? runView.byNode.get(node.id) : undefined
       return {
         id: node.id,
         type: 'step',
@@ -207,12 +410,12 @@ function Editor() {
           hasError: viewing
             ? false
             : (byNode.get(node.id) ?? []).some((issue) => issue.severity === 'error'),
-          outcome: run?.outcome,
-          durationMs: run?.durationMs,
+          outcome: stepRun?.outcome,
+          durationMs: stepRun?.durationMs,
         },
       }
     })
-  }, [nodes, selectedNodeId, byNode, viewing, runView])
+  }, [nodes, selectedNodeId, byNode, viewing, run, runView])
 
   const rfEdges = useMemo<Edge[]>(() => {
     const source = viewing ? run.graph.edges : edges
@@ -233,7 +436,7 @@ function Editor() {
         style: viewing && !taken ? { opacity: 0.22, strokeDasharray: '4 4' } : undefined,
       }
     })
-  }, [edges, viewing, runView])
+  }, [edges, viewing, run, runView])
 
   /* ------------------------------------------------ React Flow → store */
 
@@ -302,15 +505,37 @@ function Editor() {
     graphStore.endGesture()
   }, [])
 
-  const addStep = useCallback((kind: string) => {
+  const addStep = useCallback((kind: string, position?: { x: number; y: number }) => {
     const id = `${kind}-${Math.random().toString(36).slice(2, 7)}`
     graphStore.getState().addNode({
       id,
       kind,
-      position: { x: 120 + Math.random() * 320, y: 80 + Math.random() * 260 },
+      position: position ?? { x: 120 + Math.random() * 320, y: 80 + Math.random() * 260 },
       data: { label: kind },
     })
     editorStore.getState().select(id)
+  }, [])
+
+  // Dropping onto the canvas needs the pointer translated out of screen space
+  // and into flow space, otherwise the node lands wherever the viewport
+  // happens to be panned to rather than under the cursor.
+  const onDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault()
+      if (viewing) return
+      const kind = event.dataTransfer.getData('application/automabuild-step')
+      // Anything else dragged in — a file, a text selection — is not ours.
+      if (kind === '' || !STEP_KINDS.includes(kind as (typeof STEP_KINDS)[number])) return
+      addStep(kind, screenToFlowPosition({ x: event.clientX, y: event.clientY }))
+    },
+    [addStep, screenToFlowPosition, viewing],
+  )
+
+  const onDragOver = useCallback((event: React.DragEvent) => {
+    // Without preventDefault the browser refuses the drop and the card snaps
+    // back with no explanation.
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'move'
   }, [])
 
   const selected = useMemo(
@@ -327,27 +552,18 @@ function Editor() {
           <button
             className={mode === 'edit' ? 'mode active' : 'mode'}
             onClick={() => editorStore.getState().setMode('edit')}
+            title="Build the flow"
           >
-            Edit
+            Builder
           </button>
           <button
             className={mode === 'run' ? 'mode active' : 'mode'}
             onClick={() => editorStore.getState().setMode('run')}
-            title="View a past execution"
+            title="Past runs, and what each step did"
           >
-            Run viewer
+            History
           </button>
         </div>
-
-        {!viewing && (
-          <div className="palette">
-            {STEP_KINDS.map((kind) => (
-              <button key={kind} onClick={() => addStep(kind)} title={`Add a ${kind} step`}>
-                + {kind}
-              </button>
-            ))}
-          </div>
-        )}
 
         <div className="spacer" />
 
@@ -404,6 +620,19 @@ function Editor() {
       )}
 
       <div className="workspace">
+        {viewing ? (
+          <RunHistory
+            history={history}
+            currentId={run.id}
+            onPick={pickRun}
+            loading={loadingRun}
+            live={live}
+            now={renderedAt}
+          />
+        ) : (
+          <StepLibrary onAdd={addStep} />
+        )}
+
         <ReactFlow
           nodes={rfNodes}
           edges={rfEdges}
@@ -412,6 +641,8 @@ function Editor() {
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
           onNodeDragStop={onNodeDragStop}
+          onDrop={onDrop}
+          onDragOver={onDragOver}
           isValidConnection={isValidConnection}
           onPaneClick={() => editorStore.getState().select(null)}
           onNodeDoubleClick={(_event, node) => {
@@ -793,7 +1024,8 @@ function StepForm({
   kind: string
   data: Record<string, unknown>
 }) {
-  const fields = SCHEMAS[kind]?.fields ?? []
+  const schema = SCHEMAS[kind]
+  const fields = schema?.fields ?? []
 
   return (
     <form onSubmit={(event) => event.preventDefault()}>
@@ -805,6 +1037,7 @@ function StepForm({
           key={field}
           label={field}
           value={String(data[field] ?? '')}
+          multiline={schema?.multiline?.includes(field) ?? false}
           onCommit={(value) => {
             graphStore.getState().updateNodeData(nodeId, { [field]: value })
             graphStore.endGesture()
@@ -825,28 +1058,51 @@ function StepForm({
 function Field({
   label,
   value,
+  multiline = false,
   onCommit,
 }: {
   label: string
   value: string
+  multiline?: boolean
   onCommit: (value: string) => void
 }) {
   const [draft, setDraft] = useState(value)
   useEffect(() => setDraft(value), [value])
 
+  const commit = () => draft !== value && onCommit(draft)
+
+  // Enter blurs a single-line field, which is how you commit it. In a textarea
+  // Enter is a newline — an email body without paragraphs is not a body — so
+  // only Escape is bound there, and blur does the committing.
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    if (event.key === 'Escape') {
+      setDraft(value)
+      return
+    }
+    if (event.key === 'Enter' && !multiline) event.currentTarget.blur()
+  }
+
   return (
     <label className="field">
       <span>{label}</span>
-      <input
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={() => draft !== value && onCommit(draft)}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter') event.currentTarget.blur()
-          if (event.key === 'Escape') setDraft(value)
-        }}
-        placeholder={label === 'url' ? 'https://…  or  {{ steps.x.output.url }}' : ''}
-      />
+      {multiline ? (
+        <textarea
+          value={draft}
+          rows={5}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={onKeyDown}
+          placeholder="Hi {{ steps.fetch.output.name }},…"
+        />
+      ) : (
+        <input
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={onKeyDown}
+          placeholder={label === 'url' ? 'https://…  or  {{ steps.x.output.url }}' : ''}
+        />
+      )}
     </label>
   )
 }
