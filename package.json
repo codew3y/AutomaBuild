@@ -36,5 +36,19 @@
   },
   "bin": {
     "automa-runner": "src/cli.ts"
+  },
+  "keywords": [
+    "durable-execution",
+    "workflow",
+    "postgres",
+    "outbox",
+    "idempotency",
+    "saga",
+    "job-queue",
+    "chaos-testing"
+  ],
+  "homepage": "https://github.com/codew3y/automa-durable-runner#readme",
+  "bugs": {
+    "url": "https://github.com/codew3y/automa-durable-runner/issues"
   }
 }
