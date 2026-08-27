@@ -28,6 +28,7 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run build
 
       # The stack comes up through docker compose rather than a service
       # container, deliberately. The schema needs pg_partman and pg_cron, which

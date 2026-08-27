@@ -1,7 +1,6 @@
 {
   "name": "automa-durable-runner",
   "version": "0.0.0",
-  "private": true,
   "description": "A multi-step task engine that does not lose work when a machine dies, and does not repeat work it has already done.",
   "license": "MIT",
   "author": "Wey Tongol",
@@ -23,7 +22,8 @@
     "db:down": "docker compose down",
     "db:reset": "docker compose down -v && docker compose up -d",
     "demo:chaos": "node scripts/demo-chaos.ts",
-    "cli": "node src/cli.ts"
+    "cli": "node src/cli.ts",
+    "build": "tsc -p tsconfig.build.json"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
@@ -50,5 +50,18 @@
   "homepage": "https://github.com/codew3y/automa-durable-runner#readme",
   "bugs": {
     "url": "https://github.com/codew3y/automa-durable-runner/issues"
-  }
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "migrations",
+    "README.md",
+    "LICENSE"
+  ]
 }
