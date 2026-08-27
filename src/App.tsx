@@ -38,7 +38,7 @@ import { ancestors, canConnect, type FlowGraph } from './core/graph.ts'
 import { canPublish, issuesByNode, validate, type ValidationIssue } from './core/validation.ts'
 import { createAutosave, type SaveState } from './core/patch.ts'
 import { outputTree, referenceFor, resolveTemplate } from './core/resolve.ts'
-import { buildRunView, summarise } from './core/run.ts'
+import { buildRunView, summarise, type RunRecord } from './core/run.ts'
 import { nodeTypes } from './components/StepNode.tsx'
 import { SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
@@ -52,11 +52,11 @@ function Editor() {
   const nodes = useStore(graphStore, (state) => state.nodes)
   const edges = useStore(graphStore, (state) => state.edges)
   const selectedNodeId = useStore(editorStore, (state) => state.selectedNodeId)
-  const panelTab = useStore(editorStore, (state) => state.panelTab)
   const mode = useStore(editorStore, (state) => state.mode)
 
   const [saveState, setSaveState] = useState<SaveState>('saved')
   const [restored, setRestored] = useState(false)
+  const [setupOpen, setSetupOpen] = useState(false)
 
   const canUndo = useStore(graphStore.temporal, (state) => state.pastStates.length > 0)
   const canRedo = useStore(graphStore.temporal, (state) => state.futureStates.length > 0)
@@ -69,8 +69,37 @@ function Editor() {
   const byNode = useMemo(() => issuesByNode(issues), [issues])
   const publishable = useMemo(() => canPublish(issues), [issues])
 
-  const runView = useMemo(() => buildRunView(SAMPLE_RUN), [])
-  const runSummary = useMemo(() => summarise(SAMPLE_RUN), [])
+  /**
+   * The run being viewed.
+   *
+   * Falls back to the bundled sample, but prefers a real one if a backend is
+   * serving `/api/runs/latest`. That is the whole connection to the engine:
+   * the canvas stays useful opened straight from a static host, and shows
+   * genuine executions when there is something to show. A version that
+   * *required* a server would be a worse portfolio piece — it would not open.
+   */
+  const [run, setRun] = useState<RunRecord>(SAMPLE_RUN)
+  const [live, setLive] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('api/runs/latest')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: RunRecord | null) => {
+        if (cancelled || data === null || !Array.isArray(data.steps)) return
+        setRun(data)
+        setLive(true)
+      })
+      .catch(() => {
+        // No backend. The sample is the point of the fallback, not an error.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const runView = useMemo(() => buildRunView(run), [run])
+  const runSummary = useMemo(() => summarise(run), [run])
   const viewing = mode === 'run'
 
   const autosave = useRef(
@@ -161,7 +190,7 @@ function Editor() {
   /* ------------------------------------------------ store → React Flow */
 
   const rfNodes = useMemo<Node[]>(() => {
-    const source = viewing ? SAMPLE_RUN.graph.nodes : nodes
+    const source = viewing ? run.graph.nodes : nodes
     return source.map((node) => {
       const run = viewing ? runView.byNode.get(node.id) : undefined
       return {
@@ -186,7 +215,7 @@ function Editor() {
   }, [nodes, selectedNodeId, byNode, viewing, runView])
 
   const rfEdges = useMemo<Edge[]>(() => {
-    const source = viewing ? SAMPLE_RUN.graph.edges : edges
+    const source = viewing ? run.graph.edges : edges
     return source.map((edge) => {
       const taken = viewing ? runView.takenEdgeIds.has(edge.id) : true
       return {
@@ -354,8 +383,8 @@ function Editor() {
 
         {viewing && (
           <span className="run-summary">
-            {SAMPLE_RUN.id} · {runSummary.succeeded} ok · {runSummary.notReached} not reached ·{' '}
-            {runSummary.totalMs} ms
+            {live ? '● live' : '○ sample'} · {run.id} · {runSummary.succeeded} ok ·{' '}
+            {runSummary.notReached} not reached · {runSummary.totalMs} ms
           </span>
         )}
       </header>
@@ -385,6 +414,11 @@ function Editor() {
           onNodeDragStop={onNodeDragStop}
           isValidConnection={isValidConnection}
           onPaneClick={() => editorStore.getState().select(null)}
+          onNodeDoubleClick={(_event, node) => {
+            if (viewing) return
+            editorStore.getState().select(node.id)
+            setSetupOpen(true)
+          }}
           deleteKeyCode={null}
           nodesDraggable={!viewing}
           nodesConnectable={!viewing}
@@ -397,16 +431,102 @@ function Editor() {
 
         <aside className="panel">
           {viewing ? (
-            <RunPanel selectedId={selectedNodeId} />
+            <RunPanel selectedId={selectedNodeId} run={run} live={live} />
           ) : (
             <EditPanel
               selected={selected}
               issues={issues}
-              tab={panelTab}
               onDelete={deleteSelected}
+              onOpenSetup={() => setSetupOpen(true)}
             />
           )}
         </aside>
+      </div>
+
+      {setupOpen && selected !== null && !viewing && (
+        <SetupDialog
+          nodeId={selected.id}
+          kind={selected.kind}
+          data={selected.data}
+          onClose={() => setSetupOpen(false)}
+          onDelete={() => {
+            setSetupOpen(false)
+            deleteSelected()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * Setup as a dialog rather than a panel.
+ *
+ * Configuring a step and mapping data into it are different activities.
+ * Mapping wants the canvas visible — you are looking at what came before —
+ * so it stays in the panel. Setup is a focused edit of one thing, and putting
+ * it in a modal gives it the width its fields want and a clear moment of
+ * being finished.
+ *
+ * Escape closes, and the backdrop closes. Fields still commit on blur, so
+ * closing does not discard what was typed.
+ */
+function SetupDialog({
+  nodeId,
+  kind,
+  data,
+  onClose,
+  onDelete,
+}: {
+  nodeId: string
+  kind: string
+  data: Record<string, unknown>
+  onClose: () => void
+  onDelete: () => void
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onMouseDown={(event) => {
+        // Only a click that both starts and ends on the backdrop dismisses.
+        // Otherwise dragging to select text inside the dialog and releasing
+        // outside it would close the dialog mid-edit.
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="dialog" role="dialog" aria-modal="true" aria-label={`Configure ${nodeId}`}>
+        <header className="dialog-header">
+          <div>
+            <strong>{String(data.label ?? nodeId)}</strong>
+            <span className="muted">
+              {' '}
+              <code>{nodeId}</code> · {kind}
+            </span>
+          </div>
+          <button className="dismiss" onClick={onClose} aria-label="Close" title="Close (Esc)">
+            ✕
+          </button>
+        </header>
+
+        <div className="dialog-body">
+          <StepForm key={nodeId} nodeId={nodeId} kind={kind} data={data} />
+        </div>
+
+        <footer className="dialog-footer">
+          <button className="danger inline" onClick={onDelete}>
+            Delete step
+          </button>
+          <div className="spacer" />
+          <button onClick={onClose}>Done</button>
+        </footer>
       </div>
     </div>
   )
@@ -417,46 +537,38 @@ function Editor() {
 function EditPanel({
   selected,
   issues,
-  tab,
   onDelete,
+  onOpenSetup,
 }: {
   selected: { id: string; kind: string; data: Record<string, unknown> } | null
   issues: readonly ValidationIssue[]
-  tab: 'setup' | 'mapping'
   onDelete: () => void
+  onOpenSetup: () => void
 }) {
   const errors = issues.filter((issue) => issue.severity === 'error')
   const warnings = issues.filter((issue) => issue.severity === 'warning')
 
   return (
     <>
-      <div className="tabs">
-        <button
-          className={tab === 'setup' ? 'active' : ''}
-          onClick={() => editorStore.getState().setPanelTab('setup')}
-        >
-          Setup
-        </button>
-        <button
-          className={tab === 'mapping' ? 'active' : ''}
-          onClick={() => editorStore.getState().setPanelTab('mapping')}
-        >
-          Mapping
-        </button>
-      </div>
-
       <section className="panel-section">
+        <h2>Mapping</h2>
         {selected === null ? (
-          <p className="muted">Select a step to configure it.</p>
-        ) : tab === 'setup' ? (
+          <p className="muted">Select a step to map data into it.</p>
+        ) : (
           <>
-            <StepForm key={selected.id} nodeId={selected.id} kind={selected.kind} data={selected.data} />
+            <div className="selected-step">
+              <span>
+                <code>{selected.id}</code> · {selected.kind}
+              </span>
+              <button onClick={onOpenSetup} title="Open the setup dialog">
+                Setup…
+              </button>
+            </div>
+            <MappingPanel nodeId={selected.id} kind={selected.kind} data={selected.data} />
             <button className="danger" onClick={onDelete}>
               Delete this step
             </button>
           </>
-        ) : (
-          <MappingPanel nodeId={selected.id} kind={selected.kind} data={selected.data} />
         )}
       </section>
 
@@ -542,8 +654,6 @@ function MappingPanel({
 
   return (
     <>
-      <h2>Mapping</h2>
-
       <label className="field">
         <span>field</span>
         <select value={activeField} onChange={(event) => setActiveField(event.target.value)}>
@@ -607,19 +717,30 @@ function MappingPanel({
 
 /* ------------------------------------------------------------- run panel */
 
-function RunPanel({ selectedId }: { selectedId: string | null }) {
-  const step = SAMPLE_RUN.steps.find((candidate) => candidate.nodeId === selectedId) ?? null
+function RunPanel({
+  selectedId,
+  run,
+  live,
+}: {
+  selectedId: string | null
+  run: RunRecord
+  live: boolean
+}) {
+  const step = run.steps.find((candidate) => candidate.nodeId === selectedId) ?? null
 
   return (
     <>
       <section className="panel-section">
-        <h2>Run {SAMPLE_RUN.id}</h2>
+        <h2>Run {run.id}</h2>
         <p className="muted">
-          {new Date(SAMPLE_RUN.startedAt).toLocaleString()} · {SAMPLE_RUN.status}
+          {new Date(run.startedAt).toLocaleString()} · {run.status}
         </p>
         <p className="muted">
-          This is a past execution, rendered on the graph <em>as it was</em> when it ran. The
-          dimmed edge is the branch this run did not take.
+          {live
+            ? 'A real execution, read from the engine.'
+            : 'A bundled sample — no engine is reachable from here.'}{' '}
+          Rendered on the graph <em>as it was</em> when it ran. The dimmed edge is the branch this
+          run did not take.
         </p>
       </section>
 

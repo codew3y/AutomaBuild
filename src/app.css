@@ -324,3 +324,72 @@ button.danger { border-color: var(--error); color: var(--error); margin-top: .5r
 }
 
 .outcome { font-weight: 600; }
+
+/* --------------------------------------------------------- setup dialog */
+
+.selected-step {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .7rem;
+  font-size: .8rem;
+}
+.selected-step span { flex: 1; color: var(--muted); }
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / .35);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+  padding: 2rem;
+}
+
+.dialog {
+  width: min(30rem, 100%);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: .6rem;
+  box-shadow: 0 12px 40px rgb(0 0 0 / .3);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .7rem .9rem;
+  border-bottom: 1px solid var(--line);
+}
+.dialog-header > div { flex: 1; }
+.dialog-header .muted { font-size: .78rem; }
+
+.dialog-body { padding: .9rem; overflow-y: auto; }
+
+.dialog-footer {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .7rem .9rem;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 0 0 .6rem .6rem;
+}
+.dialog-footer .spacer { flex: 1; }
+
+/* The panel version is full-width; inside the dialog it sits beside Done. */
+button.danger.inline { width: auto; margin-top: 0; }
+
+.dialog .dismiss {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: .95rem;
+  line-height: 1;
+  padding: .2rem .4rem;
+  cursor: pointer;
+}
+.dialog .dismiss:hover { color: var(--fg); }
