@@ -182,10 +182,43 @@ endpoint is the default, so a single-tenant install needs no parameter. A run
 belonging to another tenant reads as absent rather than forbidden, because
 confirming an id exists is already more than a stranger should learn.
 
-Secrets are stored as text, which is right for a development-grade store and
-wrong for production — that column should hold a reference into a secret
-manager. It is said here, and in the migration, because a table that quietly
-holds plaintext is how that gets forgotten.
+### Where the secrets are
+
+The `endpoints.secrets` column holds a **reference**, not a secret:
+
+| Form | Read from |
+|---|---|
+| `env:WEBHOOK_SECRETS` | the server's environment |
+| `file:/run/secrets/hook` | disk — how Docker and Kubernetes present a mounted secret |
+| `literal:whsec_...` | the database itself, in plaintext |
+
+The application resolves it on every lookup, so the database records *where* a
+credential lives rather than what it is — a backup, a read replica or a
+careless `SELECT *` carries none.
+
+Deliberately not encryption-at-rest with a key in an environment variable. That
+moves the secret one step and calls it solved; the key sits next to the thing it
+protects, and a dump that has the row usually has the environment too.
+
+`literal:` still works, for tests and local development, and is reported
+everywhere as *stored in the database in plaintext* — in the endpoints list, in
+the API, and in the migration that labelled it. The point is not to forbid it
+but to make it visible, because plaintext nobody can see is plaintext nobody
+fixes. To find what still needs moving:
+
+```sql
+SELECT endpoint_id FROM endpoints
+ WHERE EXISTS (SELECT 1 FROM unnest(secrets) s WHERE s LIKE 'literal:%');
+```
+
+Creating an endpoint takes a reference and **refuses a raw secret**. A form that
+accepted one would put it in a request body, a proxy log and the database in a
+single move — the endpoint that exists to keep credentials out of the database
+would be the thing that put one there.
+
+Everything else stays in the environment and is never written down: `API_KEY`,
+`SMTP_PASSWORD`, and the editor's copy of the API key, which lives in that
+browser's `localStorage` and nowhere else.
 
 ## Security
 

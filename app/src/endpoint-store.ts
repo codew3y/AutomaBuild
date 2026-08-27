@@ -15,12 +15,25 @@
 import type { Pool } from 'pg'
 import type { Scheme } from 'automa-webhook-gate'
 
+import { describeSecretRef, resolveSecrets } from './secret-source.ts'
+
 export interface Endpoint {
   readonly endpointId: string
   readonly tenantId: string
   readonly flowId: string
   readonly scheme: Scheme
+  /**
+   * The resolved signing secrets.
+   *
+   * What the database holds is a reference — `env:NAME`, `file:/path` or
+   * `literal:value`. This is the resolved form, and it exists only in memory
+   * for the life of one lookup.
+   */
   readonly secrets: readonly string[]
+  /** How each secret is stored, safe to log. Never the values. */
+  readonly secretSources: readonly string[]
+  /** References that could not be resolved, while at least one other could. */
+  readonly secretProblems: readonly string[]
   readonly disabledAt: Date | null
 }
 
@@ -85,7 +98,14 @@ export class EndpointStore {
    * upsert would overwrite a secret someone had rotated by hand every time the
    * process restarted.
    */
-  async ensure(endpoint: Omit<Endpoint, 'disabledAt'>): Promise<Endpoint> {
+  async ensure(endpoint: {
+    endpointId: string
+    tenantId: string
+    flowId: string
+    scheme: Scheme
+    /** References, not values — see secret-source.ts. */
+    secretRefs: readonly string[]
+  }): Promise<Endpoint> {
     await this.#pool.query(
       `INSERT INTO endpoints (endpoint_id, tenant_id, flow_id, scheme, secrets)
        VALUES ($1, $2, $3, $4, $5)
@@ -95,14 +115,30 @@ export class EndpointStore {
         endpoint.tenantId,
         endpoint.flowId,
         endpoint.scheme,
-        [...endpoint.secrets],
+        [...endpoint.secretRefs],
       ],
     )
     const stored = await this.byId(endpoint.endpointId)
     if (stored === null) throw new Error(`endpoint ${endpoint.endpointId} vanished after insert`)
     return stored
   }
+
+  /**
+   * Replace how an endpoint's secrets are stored.
+   *
+   * References in, never values — the caller has already decided where the
+   * secret should live. Used to move an endpoint off plaintext once its stored
+   * value is known to match something already available elsewhere.
+   */
+  async setSecretRefs(endpointId: string, refs: readonly string[]): Promise<void> {
+    if (refs.length === 0) throw new Error("an endpoint needs at least one secret")
+    await this.#pool.query(`UPDATE endpoints SET secrets = $2 WHERE endpoint_id = $1`, [
+      endpointId,
+      [...refs],
+    ])
+  }
 }
+
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -118,12 +154,19 @@ function toEndpoint(row: {
   secrets: string[]
   disabled_at: Date | null
 }): Endpoint {
+  // Resolved here, so nothing downstream ever has to know that a stored value
+  // is a reference — and so a caller cannot accidentally verify a signature
+  // against the string "env:WEBHOOK_SECRETS".
+  const { secrets, problems } = resolveSecrets(row.secrets)
+
   return {
     endpointId: row.endpoint_id,
     tenantId: row.tenant_id,
     flowId: row.flow_id,
     scheme: row.scheme as Scheme,
-    secrets: row.secrets,
+    secrets,
+    secretSources: row.secrets.map(describeSecretRef),
+    secretProblems: problems,
     disabledAt: row.disabled_at,
   }
 }

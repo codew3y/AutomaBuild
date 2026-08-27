@@ -58,6 +58,7 @@ import { registerApiAuth, resolveApiKey } from './auth.ts'
 import { compileFlow, type CanvasGraph } from './flow.ts'
 import { FlowStore, type FlowRef } from './flow-store.ts'
 import { EndpointStore, type Endpoint } from './endpoint-store.ts'
+import { resolveSecrets } from './secret-source.ts'
 import { mappingHandlers } from './handlers.ts'
 import { toViewerListing, toViewerRun, type ViewerGraph } from './runs.ts'
 import { DEMO_FLOW } from './demo-flow.ts'
@@ -114,8 +115,38 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
     tenantId: config.tenantId,
     flowId: DEMO_FLOW_ID,
     scheme: config.scheme,
-    secrets: config.secrets,
+    // A reference, not the value. The database records where the secret lives
+    // rather than what it is, so a backup, a replica or a careless SELECT *
+    // does not carry a live credential.
+    secretRefs: ['env:WEBHOOK_SECRETS'],
   })
+
+  // One broken reference among several is survivable — the others still verify
+  // — but it must not be silent, or a half-rotated endpoint looks healthy.
+  for (const problem of seedEndpoint.secretProblems) {
+    console.warn(`warning: ${problem}`)
+  }
+
+  // Move the seeded endpoint off plaintext when it is safe to do so.
+  //
+  // `ensure` deliberately never overwrites, because it runs on every boot and
+  // would otherwise clobber a rotated secret. But an endpoint created before
+  // references existed holds its secret literally, and if that value is exactly
+  // what WEBHOOK_SECRETS already contains then rewriting it to a reference
+  // changes nothing except that the database stops holding the credential.
+  //
+  // Only when the values match. Anything else is someone's deliberate
+  // configuration and is left alone.
+  if (
+    seedEndpoint.secretSources.every((source) => source.startsWith('literal')) &&
+    seedEndpoint.secrets.length === config.secrets.length &&
+    seedEndpoint.secrets.every((secret, index) => secret === config.secrets[index])
+  ) {
+    await endpoints.setSecretRefs(seedEndpoint.endpointId, ['env:WEBHOOK_SECRETS'])
+    console.log(
+      `moved endpoint ${seedEndpoint.endpointId} off a plaintext secret to env:WEBHOOK_SECRETS`,
+    )
+  }
 
   const seedRef: FlowRef = { tenantId: seedEndpoint.tenantId, flowId: seedEndpoint.flowId }
 
@@ -326,16 +357,97 @@ function registerApi(
    * and the whole point of the secret is that possessing it proves who you are.
    */
   app.get('/api/endpoints', async () => {
-    // Secrets are deliberately absent. This endpoint exists so the editor can
-    // show which webhook feeds which flow, and a UI that displayed a signing
-    // secret would be a UI that had been given one.
+    // Secrets are deliberately absent, and `secretSources` is not a leak: it
+    // says *where* each secret lives, never what it is. A UI that displayed a
+    // signing secret would be a UI that had been given one.
     const all = await endpoints.listForTenant(seed.tenantId)
     return all.map((endpoint) => ({
       endpointId: endpoint.endpointId,
       flowId: endpoint.flowId,
       scheme: endpoint.scheme,
       disabled: endpoint.disabledAt !== null,
+      isDefault: endpoint.endpointId === seed.endpointId,
+      secretSources: endpoint.secretSources,
+      secretProblems: endpoint.secretProblems,
     }))
+  })
+
+  /**
+   * Create an endpoint.
+   *
+   * Takes secret *references*, never a secret. That is the whole point of the
+   * reference scheme: a create call carrying a raw secret would put it in a
+   * request body, a proxy log and the database in one move, and the endpoint
+   * that exists to keep credentials out of the database would be the thing
+   * that put one there.
+   *
+   * Always in this tenant. There is no tenant parameter, because a control API
+   * that lets you name the tenant is a control API that lets you name someone
+   * else's.
+   */
+  app.post('/api/endpoints', async (request, reply) => {
+    const body = request.body as
+      | { scheme?: string; secretRefs?: string[]; flowId?: string }
+      | undefined
+
+    const scheme = body?.scheme ?? 'stripe'
+    if (!['stripe', 'github', 'slack', 'standard'].includes(scheme)) {
+      return reply.code(400).send({ error: `${scheme} is not a scheme this verifies` })
+    }
+
+    const refs = body?.secretRefs ?? []
+    if (!Array.isArray(refs) || refs.length === 0) {
+      return reply.code(400).send({
+        error: 'secretRefs is required: where each secret lives, such as env:MY_HOOK_SECRET',
+      })
+    }
+
+    const raw = refs.filter((ref) => !/^(env|file|literal):/.test(String(ref)))
+    if (raw.length > 0) {
+      // Refused rather than quietly stored as a literal. Accepting it would
+      // make the easiest thing to type also the thing that writes a credential
+      // into the database.
+      return reply.code(400).send({
+        error:
+          'each secret must be a reference — env:NAME or file:/path. ' +
+          'To store a value in the database anyway, write it as literal:VALUE and know that it is plaintext.',
+      })
+    }
+
+    // Resolved before anything is written. `ensure` inserts and then reads the
+    // row back, so a reference that cannot be resolved used to leave a broken
+    // endpoint behind after returning 400 — a row that rejects every delivery
+    // and that nobody knows exists.
+    try {
+      resolveSecrets(refs)
+    } catch (error) {
+      return reply.code(400).send({ error: (error as Error).message })
+    }
+
+    const endpointId = randomUUID()
+    const flowId = body?.flowId ?? randomUUID()
+
+    try {
+      const created = await endpoints.ensure({
+        endpointId,
+        tenantId: seed.tenantId,
+        flowId,
+        scheme: scheme as Endpoint['scheme'],
+        secretRefs: refs,
+      })
+
+      return reply.code(201).send({
+        endpointId: created.endpointId,
+        flowId: created.flowId,
+        scheme: created.scheme,
+        secretSources: created.secretSources,
+      })
+    } catch (error) {
+      // The most likely failure by far: a reference to an environment variable
+      // that does not exist. Reporting it as a 400 rather than a 500 is right —
+      // it is the caller's input that is wrong, and the message says which.
+      return reply.code(400).send({ error: (error as Error).message })
+    }
   })
 
   app.get('/api/webhook', async (request, reply) => {

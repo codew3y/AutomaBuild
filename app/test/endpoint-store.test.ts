@@ -38,9 +38,9 @@ before(async () => {
   }
 
   store = new EndpointStore(pool)
-  await store.ensure({ endpointId: endpointA, tenantId: tenantA, flowId: randomUUID(), scheme: 'stripe', secrets: ['sa'] })
-  await store.ensure({ endpointId: endpointB, tenantId: tenantB, flowId: randomUUID(), scheme: 'github', secrets: ['sb1', 'sb2'] })
-  await store.ensure({ endpointId: disabled, tenantId: tenantA, flowId: randomUUID(), scheme: 'stripe', secrets: ['sd'] })
+  await store.ensure({ endpointId: endpointA, tenantId: tenantA, flowId: randomUUID(), scheme: 'stripe', secretRefs: ['literal:sa'] })
+  await store.ensure({ endpointId: endpointB, tenantId: tenantB, flowId: randomUUID(), scheme: 'github', secretRefs: ['literal:sb1', 'literal:sb2'] })
+  await store.ensure({ endpointId: disabled, tenantId: tenantA, flowId: randomUUID(), scheme: 'stripe', secretRefs: ['literal:sd'] })
   await pool.query(`UPDATE endpoints SET disabled_at = now() WHERE endpoint_id = $1`, [disabled])
 })
 
@@ -107,7 +107,7 @@ describe('resolving an endpoint', () => {
       tenantId: tenantA,
       flowId: randomUUID(),
       scheme: 'slack',
-      secrets: ['replaced'],
+      secretRefs: ['literal:replaced'],
     })
     const found = await store.forDelivery(endpointA)
     assert.deepEqual(found?.secrets, ['sa'])
