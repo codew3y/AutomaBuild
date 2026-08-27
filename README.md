@@ -164,6 +164,49 @@ Discard goes through the store's temporal wrapper, so ctrl-Z brings the work
 back. That is why it needs no confirmation dialog, and it is easy to lose by
 "optimising" the reset to bypass the store.
 
+## Multi-tenancy
+
+An endpoint decides the tenant. A delivery names its endpoint in the URL, and
+that row carries the tenant, the flow, and the secrets its signature is checked
+against — so one process serves many tenants and every query underneath is
+already scoped by `tenant_id`.
+
+That scoping was never the gap: the engine has carried `tenant_id` on every
+table and every query since its first migration. What was missing was anything
+at the edge that could decide *which* tenant a request belonged to. There was
+one endpoint id in an environment variable, so there was one tenant, and the
+first sentence of this README was the least accurate line in the repository.
+
+The control API is scoped the same way. `?endpoint=` names one; the seeded
+endpoint is the default, so a single-tenant install needs no parameter. A run
+belonging to another tenant reads as absent rather than forbidden, because
+confirming an id exists is already more than a stranger should learn.
+
+Secrets are stored as text, which is right for a development-grade store and
+wrong for production — that column should hold a reference into a secret
+manager. It is said here, and in the migration, because a table that quietly
+holds plaintext is how that gets forgotten.
+
+## Security
+
+The control API requires a key when it is reachable from anywhere but loopback.
+
+Publishing is why. A published flow is a list of URLs this server will fetch and
+addresses it will email, on a schedule someone else triggers, so an open publish
+endpoint is a remote instruction to make outbound requests. No amount of SSRF
+hardening changes that: `safe-fetch` stops a request reaching a metadata
+endpoint, it does not stop a stranger deciding what this server talks to.
+
+```bash
+export API_KEY=$(openssl rand -hex 24)
+export HOST=0.0.0.0
+```
+
+Binding is loopback by default, and setting `HOST` to anything else without
+`API_KEY` refuses to start rather than coming up open — a warning would scroll
+past and the thing would be exposed anyway. The webhook route stays open because
+it authenticates every request by signature, which is the stronger check.
+
 ## What joining them actually took
 
 Composing four libraries that were each finished and tested is where the
@@ -212,6 +255,19 @@ new, which the engine's run idempotency key closes.
 the server, which measures wall clock; the header summed step durations. The
 same run showed two different totals on the same screen.
 
+**A dropped idle database connection killed the process.** `pg.Pool` emits
+`error` for a client sitting idle, and in Node an unhandled `error` event is
+rethrown — so a database restart was an outage rather than a reconnect. It
+crashed the server the first time `docker compose restart` touched Postgres.
+
+**The control API had no authentication and bound 0.0.0.0.** Found by accident:
+a probe with no credentials returned 201 and replaced the live flow.
+
+**The mapping panel was blind on any flow you built.** It read sample outputs
+keyed by the sample flow's node ids, so a step you added yourself offered
+nothing to map from — the feature that justifies the editor worked only on the
+bundled example.
+
 And one that is not a seam bug but was worth stopping for: a `\b` in a regular
 expression reached disk as a literal backspace byte, so the pattern read
 `/<BS>json<BS>/` and matched nothing. Every tool rendered it as `/json/`,
@@ -247,8 +303,13 @@ went out" is exactly the question the viewer exists to answer.
   refuses a branch rather than guessing. `iterationIndex` exists throughout the
   schema anyway, because retrofitting it later would mean rewriting every
   partition.
-- **A `branch` step cannot be published.** The compiler refuses it rather than
-  guessing, and says so with every other problem it found.
+- **A branch needs exactly one yes path and one no path.** The compiler refuses
+  any other shape rather than guessing, because the alternative is a run that
+  stalls with both arms pending and no way to see why.
+- **The condition language is one comparison.** Six operators, or a bare value
+  tested for truthiness. Deliberately not an expression language: running
+  user-supplied code needs a sandbox, and a sandbox is a much larger thing to
+  get right than a comparison.
 - **The worker runs in the web process.** That is a deployment choice, not a
   design one: `startWorker` takes a pool and a flow, and moving it to its own
   process changes no code.

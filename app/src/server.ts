@@ -31,7 +31,7 @@ import { readFile } from 'node:fs/promises'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import Fastify, { type FastifyInstance } from 'fastify'
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
 
 import {
   PostgresReplayStore,
@@ -56,7 +56,8 @@ import { randomUUID } from 'node:crypto'
 import { loadConfig, type AppConfig } from './config.ts'
 import { registerApiAuth, resolveApiKey } from './auth.ts'
 import { compileFlow, type CanvasGraph } from './flow.ts'
-import { FlowStore } from './flow-store.ts'
+import { FlowStore, type FlowRef } from './flow-store.ts'
+import { EndpointStore, type Endpoint } from './endpoint-store.ts'
 import { mappingHandlers } from './handlers.ts'
 import { toViewerListing, toViewerRun, type ViewerGraph } from './runs.ts'
 import { DEMO_FLOW } from './demo-flow.ts'
@@ -102,17 +103,26 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
   const gatePool = createGatePool(config.gateDb)
   const runnerPool = createRunnerPool(config.runnerDb)
 
-  const flows = new FlowStore({
-    pool: runnerPool,
+  const flows = new FlowStore({ pool: runnerPool })
+  const endpoints = new EndpointStore(runnerPool)
+
+  // The endpoint in the environment is a *seed*, not the only one. It exists so
+  // a fresh database has something to receive a webhook on; every other
+  // endpoint is a row, and every row names its own tenant.
+  const seedEndpoint = await endpoints.ensure({
+    endpointId: config.endpointId,
     tenantId: config.tenantId,
     flowId: DEMO_FLOW_ID,
+    scheme: config.scheme,
+    secrets: config.secrets,
   })
 
-  // Seed the first version if nothing has ever been published, so a fresh
-  // database has something to run rather than rejecting the first webhook.
-  let current = await flows.current()
+  const seedRef: FlowRef = { tenantId: seedEndpoint.tenantId, flowId: seedEndpoint.flowId }
+
+  let current = await flows.current(seedRef)
   if (current === null) {
     const seeded = await flows.publish(graph, {
+      ref: seedRef,
       versionId: DEMO_FLOW_VERSION_ID,
       publishedBy: 'startup',
     })
@@ -138,12 +148,6 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
   const store = new PostgresReplayStore(gatePool)
   const gate = createGate({ store })
 
-  const endpoint: EndpointConfig = {
-    endpointId: config.endpointId,
-    scheme: config.scheme,
-    secrets: config.secrets,
-  }
-
   registerWebhookRoute(app, {
     path: '/webhooks/:endpointId',
     gate,
@@ -151,23 +155,44 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
     // would leave the delivery recorded as seen and never acted on. Passing the
     // store lets the route unwind that record and the retry be treated as new.
     store,
-    lookup: (endpointId) => (endpointId === config.endpointId ? endpoint : null),
+
+    // The endpoint decides the tenant. This is the whole of what made the
+    // application single-tenant: there was one id in an environment variable
+    // and therefore one tenant, while every table underneath had been scoped
+    // by tenant_id since the first migration.
+    lookup: async (endpointId): Promise<EndpointConfig | null> => {
+      const found = await endpoints.forDelivery(endpointId)
+      if (found === null) return null
+      return {
+        endpointId: found.endpointId,
+        scheme: found.scheme,
+        secrets: found.secrets,
+      }
+    },
 
     // The seam. Verified, de-duplicated, and now durable.
-    onAccepted: async (_endpoint, request, result) => {
+    onAccepted: async (accepted, request, result) => {
       const body = parseBody(request.rawBody)
+
+      // Re-read rather than trusting the gate's copy: the gate is handed only
+      // what it needs to verify a signature, and the tenant is not part of
+      // that.
+      const owner = await endpoints.forDelivery(accepted.endpointId)
+      if (owner === null) throw new Error(`endpoint ${accepted.endpointId} vanished mid-delivery`)
+
+      const ref: FlowRef = { tenantId: owner.tenantId, flowId: owner.flowId }
 
       // Read per delivery, not captured once. A publish between two webhooks
       // must affect the second one, and a run created from a stale definition
       // would then be executed against a version it was not built from.
-      const live = await flows.current()
-      if (live === null) throw new Error('no flow is published')
+      const live = await flows.current(ref)
+      if (live === null) throw new Error(`no flow is published for ${owner.flowId}`)
       const definition = await flows.resolver()(live.versionId)
       if (definition === null) throw new Error(`flow version ${live.versionId} will not compile`)
 
       await withTransaction(runnerPool, async (tx) => {
         const { run, deduplicated } = await createRun(tx, {
-          tenantId: config.tenantId,
+          tenantId: owner.tenantId,
           flow: definition,
           input: body,
           // The gate's dedup key, reused as the engine's. Two layers keyed on
@@ -189,7 +214,7 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
     },
   })
 
-  registerApi(app, runnerPool, flows, config)
+  registerApi(app, runnerPool, flows, endpoints, seedEndpoint)
   await registerCanvas(app, config)
 
   const worker =
@@ -205,7 +230,10 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
             handlers: mappingHandlers(),
             workerId: `web-${process.pid}`,
           },
-          { tenantId: config.tenantId },
+          // No tenant filter: one worker serves every tenant, and isolation
+          // is the engine's, enforced on every query rather than by which
+          // process happens to be running.
+          {},
         )
 
   const uninstall = worker === null ? () => {} : installSignalHandlers(worker)
@@ -270,8 +298,23 @@ function registerApi(
   app: FastifyInstance,
   pool: ReturnType<typeof createRunnerPool>,
   flows: FlowStore,
-  config: AppConfig,
+  endpoints: EndpointStore,
+  seed: Endpoint,
 ): void {
+  /**
+   * Which endpoint this request is about, and therefore which tenant.
+   *
+   * `?endpoint=` names it; the seeded one is the default so that a
+   * single-tenant install needs no parameter and the editor works unchanged.
+   * Everything downstream is scoped by the tenant this returns, which is what
+   * stops one tenant reading another's runs — the alternative, a tenant id in
+   * the query string, would be an invitation to type someone else's.
+   */
+  const scopeOf = async (request: FastifyRequest): Promise<Endpoint | null> => {
+    const requested = (request.query as { endpoint?: string }).endpoint
+    if (requested === undefined || requested === seed.endpointId) return seed
+    return endpoints.byId(requested)
+  }
   app.get('/api/health', async () => ({ ok: true }))
 
   /**
@@ -282,19 +325,35 @@ function registerApi(
    * it. The secret is deliberately not here: this endpoint is unauthenticated,
    * and the whole point of the secret is that possessing it proves who you are.
    */
-  app.get('/api/webhook', async (request) => {
+  app.get('/api/endpoints', async () => {
+    // Secrets are deliberately absent. This endpoint exists so the editor can
+    // show which webhook feeds which flow, and a UI that displayed a signing
+    // secret would be a UI that had been given one.
+    const all = await endpoints.listForTenant(seed.tenantId)
+    return all.map((endpoint) => ({
+      endpointId: endpoint.endpointId,
+      flowId: endpoint.flowId,
+      scheme: endpoint.scheme,
+      disabled: endpoint.disabledAt !== null,
+    }))
+  })
+
+  app.get('/api/webhook', async (request, reply) => {
+    const scope = await scopeOf(request)
+    if (scope === null) return reply.code(404).send({ error: 'no such endpoint' })
+
     const forwardedHost = request.headers['x-forwarded-host']
     const host = (Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost) ?? request.headers.host
     const proto = request.headers['x-forwarded-proto'] ?? 'http'
 
     return {
-      endpointId: config.endpointId,
-      scheme: config.scheme,
+      endpointId: scope.endpointId,
+      scheme: scope.scheme,
       // Built from the request, so it is right behind a proxy and right when
       // the editor is being served from the dev server on another port.
-      url: `${Array.isArray(proto) ? proto[0] : proto}://${host}/webhooks/${config.endpointId}`,
-      signatureHeader: SIGNATURE_HEADERS[config.scheme],
-      secretConfigured: config.secrets.length > 0,
+      url: `${Array.isArray(proto) ? proto[0] : proto}://${host}/webhooks/${scope.endpointId}`,
+      signatureHeader: SIGNATURE_HEADERS[scope.scheme],
+      secretConfigured: scope.secrets.length > 0,
     }
   })
 
@@ -305,8 +364,11 @@ function registerApi(
    * running — which is the whole basis of the Publish / Discard pair. Without
    * it the editor can only ever say "unsaved", never "unpublished".
    */
-  app.get('/api/flows/published', async (_request, reply) => {
-    const current = await flows.current()
+  app.get('/api/flows/published', async (request, reply) => {
+    const scope = await scopeOf(request)
+    if (scope === null) return reply.code(404).send({ error: 'no such endpoint' })
+
+    const current = await flows.current({ tenantId: scope.tenantId, flowId: scope.flowId })
     if (current === null) return reply.code(404).send({ error: 'nothing published yet' })
     return {
       versionId: current.versionId,
@@ -336,7 +398,11 @@ function registerApi(
       return reply.code(400).send({ error: 'a graph with nodes and edges is required' })
     }
 
+    const scope = await scopeOf(request)
+    if (scope === null) return reply.code(404).send({ error: 'no such endpoint' })
+
     const result = await flows.publish(graph, {
+      ref: { tenantId: scope.tenantId, flowId: scope.flowId },
       versionId: randomUUID(),
       ...(body?.publishedBy === undefined ? {} : { publishedBy: body.publishedBy }),
     })
@@ -364,7 +430,10 @@ function registerApi(
    * `totalMs` is summed from the run's own timestamps rather than its steps
    * for the same reason.
    */
-  app.get('/api/runs', async (request) => {
+  app.get('/api/runs', async (request, reply) => {
+    const scope = await scopeOf(request)
+    if (scope === null) return reply.code(404).send({ error: 'no such endpoint' })
+
     const limit = Math.min(Number((request.query as { limit?: string }).limit ?? 50), 200)
     const { rows } = await pool.query(
       `SELECT id, tenant_id, flow_id, flow_version_id, status, attempt_group,
@@ -373,10 +442,10 @@ function registerApi(
               error_class, error_code, input_inline,
               COALESCE((EXTRACT(EPOCH FROM (finished_at - started_at)) * 1000)::integer, 0) AS total_ms
          FROM runs
-        WHERE tenant_id = $1
+        WHERE tenant_id = $1 AND flow_id = $3
         ORDER BY started_at DESC
         LIMIT $2`,
-      [config.tenantId, limit],
+      [scope.tenantId, limit, scope.flowId],
     )
 
     return rows.map((row) =>
@@ -405,10 +474,14 @@ function registerApi(
     )
   })
 
-  app.get('/api/runs/latest', async (_request, reply) => {
+  app.get('/api/runs/latest', async (request, reply) => {
+    const scope = await scopeOf(request)
+    if (scope === null) return reply.code(404).send({ error: 'no such endpoint' })
+
     const { rows } = await pool.query(
-      `SELECT id, started_at FROM runs WHERE tenant_id = $1 ORDER BY started_at DESC LIMIT 1`,
-      [config.tenantId],
+      `SELECT id, started_at FROM runs WHERE tenant_id = $1 AND flow_id = $2
+        ORDER BY started_at DESC LIMIT 1`,
+      [scope.tenantId, scope.flowId],
     )
     if (rows.length === 0) {
       // Not an error, and not an empty run either: there is genuinely nothing
@@ -423,9 +496,15 @@ function registerApi(
     const { id } = request.params as { id: string }
     // A run is keyed by (started_at, id) because `runs` is partitioned by
     // start time, so the timestamp has to be found before the row can be.
+    const scope = await scopeOf(request)
+    if (scope === null) return reply.code(404).send({ error: 'no such endpoint' })
+
+    // Scoped by tenant, and a run belonging to another one is reported as
+    // absent rather than forbidden: confirming that an id exists is already
+    // more than a stranger should learn.
     const { rows } = await pool.query(
       `SELECT started_at FROM runs WHERE id = $1 AND tenant_id = $2`,
-      [id, config.tenantId],
+      [id, scope.tenantId],
     )
     if (rows.length === 0) return reply.code(404).send({ error: 'no such run' })
     return sendRun(reply, pool, flows, rows[0].started_at, id)

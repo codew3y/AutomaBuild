@@ -27,6 +27,10 @@ export interface PublishedFlow {
 
 export interface FlowStoreOptions {
   readonly pool: Pool
+}
+
+/** Which flow, for a store that serves many. */
+export interface FlowRef {
   readonly tenantId: string
   readonly flowId: string
 }
@@ -37,8 +41,6 @@ export type PublishResult =
 
 export class FlowStore {
   readonly #pool: Pool
-  readonly #tenantId: string
-  readonly #flowId: string
 
   /**
    * Compiled definitions, keyed by version.
@@ -52,19 +54,17 @@ export class FlowStore {
 
   constructor(options: FlowStoreOptions) {
     this.#pool = options.pool
-    this.#tenantId = options.tenantId
-    this.#flowId = options.flowId
   }
 
   /** The version that new runs should use, or null if nothing is published. */
-  async current(): Promise<PublishedFlow | null> {
+  async current(ref: FlowRef): Promise<PublishedFlow | null> {
     const { rows } = await this.#pool.query(
       `SELECT version_id, flow_id, graph, published_at, published_by
          FROM published_flows
         WHERE tenant_id = $1 AND flow_id = $2
         ORDER BY published_at DESC, version_id DESC
         LIMIT 1`,
-      [this.#tenantId, this.#flowId],
+      [ref.tenantId, ref.flowId],
     )
     return rows.length === 0 ? null : toPublished(rows[0])
   }
@@ -120,9 +120,9 @@ export class FlowStore {
    */
   async publish(
     graph: CanvasGraph,
-    options: { versionId: string; publishedBy?: string },
+    options: { ref: FlowRef; versionId: string; publishedBy?: string },
   ): Promise<PublishResult> {
-    const compiled = compileFlow(graph, { flowId: this.#flowId, versionId: options.versionId })
+    const compiled = compileFlow(graph, { flowId: options.ref.flowId, versionId: options.versionId })
     if (!compiled.ok) return { ok: false, problems: compiled.problems }
 
     const { rows } = await this.#pool.query(
@@ -131,8 +131,8 @@ export class FlowStore {
        RETURNING version_id, flow_id, graph, published_at, published_by`,
       [
         options.versionId,
-        this.#flowId,
-        this.#tenantId,
+        options.ref.flowId,
+        options.ref.tenantId,
         JSON.stringify(graph),
         options.publishedBy ?? null,
       ],
