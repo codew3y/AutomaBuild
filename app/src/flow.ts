@@ -5,8 +5,10 @@
  * the two disagree in ways worth being explicit about rather than papering
  * over:
  *
- *   - The canvas is a graph. The engine v1 executes a linear chain. A drawing
- *     with a branch in it is a valid drawing and not yet a runnable flow.
+ *   - The canvas is a graph and the engine executes steps in topological
+ *     order, so the compiler flattens one into the other and hands over the
+ *     edges as well, which is what lets a branch know what its untaken arm
+ *     abandons.
  *   - The canvas has a trigger node. The engine has no such concept — the
  *     trigger already happened; it is why there is a run at all. It compiles to
  *     a step anyway, one whose output is the payload that arrived, so the run
@@ -17,7 +19,7 @@
  * first. Someone fixing a flow wants the list, not one error at a time.
  */
 
-import type { FlowDefinition, FlowNode } from 'automa-durable-runner'
+import type { FlowDefinition, FlowEdge, FlowNode } from 'automa-durable-runner'
 
 /** The canvas's shape. Mirrored, not imported: the editor ships to a browser
  *  and this runs on a server; a shared package for four interfaces would be
@@ -75,6 +77,7 @@ const KIND_TO_EXECUTOR: Record<string, string> = {
   http: 'http',
   transform: 'transform',
   email: 'email',
+  branch: 'branch',
 }
 
 /**
@@ -148,40 +151,75 @@ export function compileFlow(graph: CanvasGraph, options: CompileOptions): Compil
     else list.push(edge)
   }
 
-  // Walk the chain from the entry. `seen` guards against a cycle further down,
-  // which entryPoints cannot detect on its own: a chain that loops back on
-  // itself below the entry still leaves the entry untargeted.
+  // A depth-first walk that follows every edge, so both arms of a branch are
+  // reached. `chain` ends up in topological order, which is the order the
+  // engine executes in; `seen` guards against a cycle, which entryPoints
+  // cannot detect on its own because a loop below the entry still leaves the
+  // entry untargeted.
   const chain: CanvasNode[] = []
   const seen = new Set<string>()
-  let current: CanvasNode | undefined = entry
+  const onPath = new Set<string>()
+  let cyclic = false
 
-  while (current !== undefined) {
-    if (seen.has(current.id)) {
-      problems.push({ nodeId: current.id, message: 'The flow loops back on itself.' })
-      break
+  const visit = (node: CanvasNode): void => {
+    if (onPath.has(node.id)) {
+      // Back to a node still on the current path: a genuine cycle, as opposed
+      // to a join where two arms meet again.
+      if (!cyclic) {
+        cyclic = true
+        problems.push({ nodeId: node.id, message: 'The flow loops back on itself.' })
+      }
+      return
     }
-    seen.add(current.id)
-    chain.push(current)
+    if (seen.has(node.id)) return
 
-    if (current.kind === 'branch') {
+    seen.add(node.id)
+    onPath.add(node.id)
+
+    for (const edge of outgoing.get(node.id) ?? []) {
+      const target = byId.get(edge.target)
+      if (target !== undefined) visit(target)
+    }
+
+    onPath.delete(node.id)
+    // Prepended, so a node always lands before everything it leads to.
+    chain.unshift(node)
+  }
+
+  visit(entry)
+
+  for (const node of chain) {
+    if (node.kind !== 'branch') {
+      const next = outgoing.get(node.id) ?? []
+      if (next.length > 1) {
+        problems.push({
+          nodeId: node.id,
+          message: 'Only a branch step may lead to more than one next step.',
+        })
+      }
+      continue
+    }
+
+    // A branch is defined by its two labelled arms. Anything else is a shape
+    // the engine cannot resolve, and it is far better caught here than as a
+    // run that stalls with both arms pending.
+    const arms = (outgoing.get(node.id) ?? []).filter(
+      (edge) => edge.sourceHandle === 'yes' || edge.sourceHandle === 'no',
+    )
+    const yes = arms.filter((edge) => edge.sourceHandle === 'yes')
+    const no = arms.filter((edge) => edge.sourceHandle === 'no')
+
+    if (yes.length !== 1 || no.length !== 1) {
       problems.push({
-        nodeId: current.id,
+        nodeId: node.id,
         message:
-          'The engine runs a single chain of steps; branches are not supported yet. ' +
-          'Remove the branch, or split the flow in two.',
+          'A branch needs exactly one "yes" path and one "no" path. ' +
+          `This one has ${yes.length} and ${no.length}.`,
       })
-      break
     }
-
-    const next: CanvasEdge[] = outgoing.get(current.id) ?? []
-    if (next.length > 1) {
-      problems.push({
-        nodeId: current.id,
-        message: 'This step leads to more than one next step, and the engine runs one chain.',
-      })
-      break
+    if (String(node.data?.['condition'] ?? '').trim() === '') {
+      problems.push({ nodeId: node.id, message: 'A branch step needs a condition.' })
     }
-    current = next.length === 1 ? byId.get(next[0]!.target) : undefined
   }
 
   // Anything the walk never reached is unreachable, whether it is stranded or
@@ -235,9 +273,22 @@ export function compileFlow(graph: CanvasGraph, options: CompileOptions): Compil
     config: { ...(node.data ?? {}), canvasKind: node.kind },
   }))
 
+  // Only the edges between steps that made it into the flow. An edge to a
+  // node the walk never reached would point at a step that does not exist.
+  const included = new Set(chain.map((node) => node.id))
+  const edges: FlowEdge[] = graph.edges
+    .filter((edge) => included.has(edge.source) && included.has(edge.target))
+    .map((edge) => ({
+      from: edge.source,
+      to: edge.target,
+      ...(edge.sourceHandle === 'yes' || edge.sourceHandle === 'no'
+        ? { arm: edge.sourceHandle }
+        : {}),
+    }))
+
   return {
     ok: true,
-    flow: { id: options.flowId, versionId: options.versionId, nodes },
+    flow: { id: options.flowId, versionId: options.versionId, nodes, edges },
     warnings,
   }
 }

@@ -16,6 +16,7 @@
 import { StepFailure, defaultHandlers, type HandlerRegistry, type StepContext, type StepHandler, type StepResult } from 'automa-durable-runner'
 
 import { transformHandler } from './steps/transform.ts'
+import { branchHandler } from './steps/branch.ts'
 import { emailHandler, smtpFromEnv, type SmtpConfig } from './steps/email.ts'
 
 /** `{{ steps.fetch.output.email }}` — whitespace-tolerant, nothing else. */
@@ -257,6 +258,7 @@ export function mappingHandlers(options: HandlerOptions = {}): HandlerRegistry {
     ...defaultHandlers(),
     trigger: triggerHandler,
     transform: transformHandler(),
+    branch: branchHandler(),
     email:
       smtp === null
         ? unconfigured('email', 'SMTP_HOST is not set')

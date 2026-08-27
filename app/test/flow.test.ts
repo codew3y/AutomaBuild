@@ -156,8 +156,48 @@ describe('compiling a canvas graph into a flow definition', () => {
     assert.equal(result.ok, true)
   })
 
+  test('a well-formed branch compiles, and carries its arms as labelled edges', () => {
+    const result = compileFlow(
+      {
+        nodes: [
+          { id: 't', kind: 'trigger', position: at(0) },
+          { id: 'b', kind: 'branch', position: at(1), data: { condition: '{{ x }} = premium' } },
+          { id: 'y', kind: 'http', position: at(2), data: { url: 'https://example.com/y' } },
+          { id: 'n', kind: 'http', position: at(3), data: { url: 'https://example.com/n' } },
+          { id: 'join', kind: 'http', position: at(4), data: { url: 'https://example.com/j' } },
+        ],
+        edges: [
+          { id: 'e0', source: 't', target: 'b' },
+          { id: 'e1', source: 'b', target: 'y', sourceHandle: 'yes' },
+          { id: 'e2', source: 'b', target: 'n', sourceHandle: 'no' },
+          { id: 'e3', source: 'y', target: 'join' },
+          { id: 'e4', source: 'n', target: 'join' },
+        ],
+      },
+      options,
+    )
+
+    assert.equal(result.ok, true)
+    if (!result.ok) return
+
+    // Topological: every node appears before anything it leads to.
+    const order = new Map(result.flow.nodes.map((node, index) => [node.id, index]))
+    for (const edge of result.flow.edges ?? []) {
+      assert.ok(
+        order.get(edge.from)! < order.get(edge.to)!,
+        `${edge.from} must come before ${edge.to}`,
+      )
+    }
+
+    const arms = (result.flow.edges ?? []).filter((edge) => edge.arm !== undefined)
+    assert.deepEqual(arms.map((edge) => edge.arm).sort(), ['no', 'yes'])
+  })
+
   describe('what it refuses to compile', () => {
-    test('a branch, because the engine runs one chain', () => {
+    test('a branch whose arms are not labelled yes and no', () => {
+      // Two plain edges out of a branch is a shape the engine cannot resolve.
+      // Far better caught here than as a run that stalls with both arms
+      // pending and no way to tell why.
       const result = compile(
         graph(
           [
@@ -175,7 +215,48 @@ describe('compiling a canvas graph into a flow definition', () => {
       )
       assert.equal(result.ok, false)
       if (result.ok) return
-      assert.ok(result.problems.some((p) => /branches are not supported/.test(p.message)))
+      assert.ok(result.problems.some((p) => /one "yes" path and one "no" path/.test(p.message)))
+    })
+
+    test('a branch with no condition', () => {
+      const result = compileFlow(
+        {
+          nodes: [
+            { id: 't', kind: 'trigger', position: at(0) },
+            { id: 'b', kind: 'branch', position: at(1) },
+            { id: 'y', kind: 'http', position: at(2), data: { url: 'https://example.com' } },
+            { id: 'n', kind: 'http', position: at(3), data: { url: 'https://example.com' } },
+          ],
+          edges: [
+            { id: 'e0', source: 't', target: 'b' },
+            { id: 'e1', source: 'b', target: 'y', sourceHandle: 'yes' },
+            { id: 'e2', source: 'b', target: 'n', sourceHandle: 'no' },
+          ],
+        },
+        options,
+      )
+      assert.equal(result.ok, false)
+      if (result.ok) return
+      assert.ok(result.problems.some((p) => /needs a condition/.test(p.message)))
+    })
+
+    test('an ordinary step leading to two places', () => {
+      const result = compile(
+        graph(
+          [
+            ['t', 'trigger'],
+            ['a', 'http', { url: 'https://example.com' }],
+            ['b', 'http', { url: 'https://example.com' }],
+          ],
+          [
+            ['t', 'a'],
+            ['t', 'b'],
+          ],
+        ),
+      )
+      assert.equal(result.ok, false)
+      if (result.ok) return
+      assert.ok(result.problems.some((p) => /Only a branch step may lead/.test(p.message)))
     })
 
     test('a flow that does not start at a trigger', () => {
