@@ -1,0 +1,32 @@
+# Postgres for the replay store. Nothing else is needed: this project verifies
+# and de-duplicates, and hands the event on. No queue, no workers, no Redis.
+#
+#   docker compose up -d && npm run db:migrate && npm test
+
+name: automa-webhook-gate
+
+services:
+  postgres:
+    image: postgres:18-trixie
+    environment:
+      POSTGRES_DB: webhookgate
+      POSTGRES_USER: webhookgate
+      POSTGRES_PASSWORD: webhookgate
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    ports:
+      # A non-standard port so a local Postgres cannot be hit by accident. The
+      # test suite truncates tables.
+      - '54331:5432'
+    volumes:
+      # Postgres 18 images keep data in a major-version subdirectory, so the
+      # mount belongs here and not at .../data as it did through 17.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U webhookgate -d webhookgate']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

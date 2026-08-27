@@ -16,7 +16,12 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --test-concurrency=1 \"test/*.test.ts\"",
-    "coverage": "node --test --test-concurrency=1 --experimental-test-coverage \"test/*.test.ts\""
+    "coverage": "node --test --test-concurrency=1 --experimental-test-coverage \"test/*.test.ts\"",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && docker compose up -d",
+    "db:migrate": "node scripts/migrate.ts",
+    "demo": "node src/demo.ts"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
@@ -26,5 +31,20 @@
   "dependencies": {
     "fastify": "^5.12.1",
     "pg": "^8.23.0"
+  },
+  "keywords": [
+    "webhook",
+    "hmac",
+    "signature-verification",
+    "replay-protection",
+    "stripe",
+    "github",
+    "slack",
+    "standard-webhooks",
+    "fastify"
+  ],
+  "homepage": "https://github.com/codew3y/automa-webhook-gate#readme",
+  "bugs": {
+    "url": "https://github.com/codew3y/automa-webhook-gate/issues"
   }
 }
