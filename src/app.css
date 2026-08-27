@@ -560,3 +560,8 @@ button.danger.inline { width: auto; margin-top: 0; }
 /* `hidden` on a flex child is overridden by `display: flex` unless this says
    otherwise — the attribute would be set and the panel would stay visible. */
 .panel[hidden] { display: none; }
+
+.tree-heading { display: flex; align-items: baseline; gap: .4rem; }
+.tree-source { font-size: .68rem; font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: auto; }
+.tree-missing { font-size: .76rem; margin: 0 0 .5rem; }
+.tree-missing code { font-size: .72rem; }

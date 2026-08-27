@@ -39,7 +39,7 @@ import { ancestors, canConnect, type FlowGraph } from './core/graph.ts'
 import { canPublish, issuesByNode, validate, type ValidationIssue } from './core/validation.ts'
 import { createAutosave, type SaveState } from './core/patch.ts'
 import { outputTree, referenceFor, resolveTemplate } from './core/resolve.ts'
-import { buildRunView, summarise, type RunRecord } from './core/run.ts'
+import { buildRunView, outputsFromRun, summarise, type RunRecord } from './core/run.ts'
 import { describeRun, relativeTime, sortHistory, type RunListing } from './core/history.ts'
 import { diffGraph } from './core/patch.ts'
 import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
@@ -486,6 +486,25 @@ function Editor() {
     },
     [run.id],
   )
+
+  /**
+   * What each step actually produced, for the mapping panel.
+   *
+   * The panel used to read a fixed table of sample outputs keyed by the sample
+   * flow's node ids — `trigger`, `fetch`, `check`, `thanks`. Any step someone
+   * added themselves got an id like `http-a3f2k`, which was not in that table,
+   * so the panel offered nothing to map from and the feature was dead on every
+   * flow that was not the sample.
+   *
+   * A real run is the honest source: it is what the fields actually contain.
+   * The sample is kept underneath rather than replaced, so the panel still has
+   * something to show on a flow that has never run, and so the editor opened
+   * from a static host is not empty.
+   */
+  const mappingOutputs = useMemo(() => {
+    const fromRun = outputsFromRun(run)
+    return live ? { ...SAMPLE_OUTPUTS, ...fromRun } : SAMPLE_OUTPUTS
+  }, [run, live])
 
   const runView = useMemo(() => buildRunView(run), [run])
   const runSummary = useMemo(() => summarise(run), [run])
@@ -947,6 +966,8 @@ function Editor() {
             <EditPanel
               selected={selected}
               issues={issues}
+              outputs={mappingOutputs}
+              live={live}
               onDelete={deleteSelected}
               onOpenSetup={() => setSetupOpen(true)}
             />
@@ -1054,11 +1075,15 @@ function SetupDialog({
 function EditPanel({
   selected,
   issues,
+  outputs,
+  live,
   onDelete,
   onOpenSetup,
 }: {
   selected: { id: string; kind: string; data: Record<string, unknown> } | null
   issues: readonly ValidationIssue[]
+  outputs: Record<string, unknown>
+  live: boolean
   onDelete: () => void
   onOpenSetup: () => void
 }) {
@@ -1081,7 +1106,13 @@ function EditPanel({
                 Setup…
               </button>
             </div>
-            <MappingPanel nodeId={selected.id} kind={selected.kind} data={selected.data} />
+            <MappingPanel
+              nodeId={selected.id}
+              kind={selected.kind}
+              data={selected.data}
+              outputs={outputs}
+              live={live}
+            />
             <button className="danger" onClick={onDelete}>
               Delete this step
             </button>
@@ -1129,10 +1160,14 @@ function MappingPanel({
   nodeId,
   kind,
   data,
+  outputs: allOutputs,
+  live,
 }: {
   nodeId: string
   kind: string
   data: Record<string, unknown>
+  outputs: Record<string, unknown>
+  live: boolean
 }) {
   const nodes = useStore(graphStore, (state) => state.nodes)
   const edges = useStore(graphStore, (state) => state.edges)
@@ -1143,10 +1178,18 @@ function MappingPanel({
     const upstream = ancestors({ nodes, edges }, nodeId)
     const outputs: Record<string, unknown> = {}
     for (const id of upstream) {
-      if (SAMPLE_OUTPUTS[id] !== undefined) outputs[id] = SAMPLE_OUTPUTS[id]
+      if (allOutputs[id] !== undefined) outputs[id] = allOutputs[id]
     }
     return outputs
-  }, [nodes, edges, nodeId])
+  }, [nodes, edges, nodeId, allOutputs])
+
+  // Which upstream steps have nothing to offer. A panel that silently lists
+  // three of five ancestors looks like the other two produce nothing, when the
+  // truth is they have not run yet — and that is fixable by running the flow.
+  const withoutData = useMemo(() => {
+    const upstream = ancestors({ nodes, edges }, nodeId)
+    return [...upstream].filter((id) => allOutputs[id] === undefined)
+  }, [nodes, edges, nodeId, allOutputs])
 
   const leaves = useMemo(() => outputTree(available), [available])
   const currentValue = String(data[activeField] ?? '')
@@ -1199,7 +1242,21 @@ function MappingPanel({
         )}
       </div>
 
-      <h2 className="tree-heading">Available from earlier steps</h2>
+      <h2 className="tree-heading">
+        Available from earlier steps
+        <span className="tree-source muted">{live ? "from the last run" : "sample data"}</span>
+      </h2>
+
+      {/* Naming the steps with no data is the difference between "this step
+          produces nothing" and "this step has not run yet" — the second is
+          fixable by running the flow, and the panel used to imply the first. */}
+      {withoutData.length > 0 && (
+        <p className="muted tree-missing">
+          No recorded output yet for {withoutData.map((id) => <code key={id}>{id}</code>).reduce((all, one, i) => (i === 0 ? [one] : [...all, ", ", one]), [] as React.ReactNode[])}
+          . Run the flow once and their fields will appear here.
+        </p>
+      )}
+
       {leaves.length === 0 ? (
         <p className="muted">
           Nothing runs before this step yet. Connect it to something upstream first.
