@@ -20,7 +20,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   Controls,
-  MiniMap,
   ReactFlow,
   ReactFlowProvider,
   type Connection,
@@ -40,7 +39,7 @@ import { canPublish, issuesByNode, validate, type ValidationIssue } from './core
 import { createAutosave, type SaveState } from './core/patch.ts'
 import { outputTree, referenceFor, resolveTemplate } from './core/resolve.ts'
 import { buildRunView, summarise } from './core/run.ts'
-import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
+import { nodeTypes } from './components/StepNode.tsx'
 import { SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
 
@@ -285,14 +284,6 @@ function Editor() {
     editorStore.getState().select(id)
   }, [])
 
-  // MiniMap draws its own rectangles and cannot see the node's CSS, so without
-  // an explicit colour every node renders in the default grey and the map is
-  // an unreadable smear.
-  const miniMapNodeColor = useCallback(
-    (node: Node) => KIND_ACCENT[String(node.data?.kind ?? '')] ?? '#94a3b8',
-    [],
-  )
-
   const selected = useMemo(
     () => nodes.find((node) => node.id === selectedNodeId) ?? null,
     [nodes, selectedNodeId],
@@ -402,7 +393,6 @@ function Editor() {
         >
           <Background gap={16} />
           <Controls showInteractive={false} />
-          <MiniMap pannable zoomable nodeColor={miniMapNodeColor} nodeStrokeWidth={2} />
         </ReactFlow>
 
         <aside className="panel">

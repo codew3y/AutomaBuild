@@ -192,15 +192,6 @@ button.publish:disabled { border-color: var(--line); color: var(--muted); }
 .react-flow__controls-button svg { fill: var(--fg); }
 .react-flow__controls-button:disabled svg { fill: var(--muted); opacity: .5; }
 
-/* The minimap draws its own rectangles; node colour is passed in from the
-   component. The mask needs to work on both themes. */
-.react-flow__minimap {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: .4rem;
-}
-.react-flow__minimap-mask { fill: color-mix(in srgb, var(--fg) 12%, transparent); }
-
 .react-flow__attribution { font-size: .65rem; opacity: .5; }
 
 /* ------------------------------------------------------------- toolbar */
