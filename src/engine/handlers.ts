@@ -102,6 +102,28 @@ export interface HttpStepConfig {
  * blocked identically on every retry, and burning five attempts discovering
  * that helps nobody.
  */
+/**
+ * A JSON response comes back as data; anything else comes back as text.
+ *
+ * The whole reason a later step wants this step's output is to read a field
+ * out of it. Handing back the raw string means every consumer has to parse it,
+ * and a template like `{{ steps.lookup.output.body.full_name }}` — which is
+ * what the editor produces — cannot resolve at all.
+ *
+ * The content type decides, and a body that claims to be JSON and is not falls
+ * back to text rather than failing the step. A provider sending malformed JSON
+ * is their bug; losing the response body over it would be ours, and the text
+ * is the only evidence of what actually arrived.
+ */
+function parseBody(text: string, contentType: string | null): unknown {
+  if (contentType === null || !/\bjson\b/i.test(contentType)) return text
+  try {
+    return JSON.parse(text)
+  } catch {
+    return text
+  }
+}
+
 export function httpHandler(options: { safeFetch?: ReturnType<typeof createSafeFetch> } = {}): StepHandler {
   const safeFetch = options.safeFetch ?? createSafeFetch({ maxRedirects: 0 })
 
@@ -138,7 +160,7 @@ export function httpHandler(options: { safeFetch?: ReturnType<typeof createSafeF
       return {
         output: {
           status: response.status,
-          body: text,
+          body: parseBody(text, response.headers.get('content-type')),
           resolvedIp: getConnectionInfo(response)?.resolvedIp ?? null,
         },
       }
