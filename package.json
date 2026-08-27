@@ -5,9 +5,14 @@
   "description": "Verify inbound webhooks properly: raw body, constant-time comparison, timestamp window, replay protection.",
   "license": "MIT",
   "author": "Wey Tongol",
-  "repository": { "type": "git", "url": "git+https://github.com/codew3y/automa-webhook-gate.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codew3y/automa-webhook-gate.git"
+  },
   "type": "module",
-  "engines": { "node": ">=22.18.0" },
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --test-concurrency=1 \"test/*.test.ts\"",
@@ -15,6 +20,11 @@
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "@types/pg": "^8.23.1",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "fastify": "^5.12.1",
+    "pg": "^8.23.0"
   }
 }
