@@ -26,7 +26,7 @@ import { drainQueue, drainUntilQuiet, advanceClock } from '../src/engine/drain.t
 import { runStep } from '../src/engine/executor.ts'
 import { claimStep, recordSuccess } from '../src/engine/repository.ts'
 import { sweep } from '../src/engine/janitor.ts'
-import { noopHandler, scriptedHandler, type StepContext } from '../src/engine/handlers.ts'
+import { StepFailure, noopHandler, scriptedHandler, type StepContext } from '../src/engine/handlers.ts'
 import type { ExecutorDeps } from '../src/engine/executor.ts'
 import { seededRandom } from '../src/random.ts'
 import type { FailureFacts } from '../src/classify.ts'
@@ -104,6 +104,130 @@ describe('engine', { skip: SKIP }, () => {
 
       const steps = await listSteps(pool, run)
       assert.ok(steps.every((s) => s.status === 'succeeded'))
+    })
+
+    it('records when each step started, finished, and how long it took', async () => {
+      // The columns existed and were written from the first migration, but
+      // nothing selected them, so every consumer had a step with no timing on
+      // it and no way to tell that the data was sitting right there.
+      const flow = makeFlow([
+        { id: 'only', kind: 'noop', idempotent: true },
+      ])
+
+      const before = new Date()
+      const run = await start(flow)
+      await drainUntilQuiet(pool, deps(flow, { noop: noopHandler }), { tenantId })
+
+      const [step] = await listSteps(pool, run)
+      assert.equal(step?.status, 'succeeded')
+      assert.ok(step?.startedAt instanceof Date, 'startedAt must be populated')
+      assert.ok(step?.finishedAt instanceof Date, 'finishedAt must be populated')
+      assert.ok(typeof step?.durationMs === 'number', 'durationMs must be populated')
+
+      assert.ok(step!.startedAt!.getTime() >= before.getTime() - 1000)
+      assert.ok(
+        step!.finishedAt!.getTime() >= step!.startedAt!.getTime(),
+        'a step cannot finish before it starts',
+      )
+      assert.ok(step!.durationMs! >= 0)
+    })
+
+    it('leaves the timing empty on a step that never ran', async () => {
+      // A step that was never reached must not report a duration of zero:
+      // "took no time" and "never happened" are the two things the run viewer
+      // exists to tell apart.
+      const permanent: FailureFacts = { httpStatus: 400 }
+      const flow = makeFlow([
+        { id: 'fails', kind: 'noop', idempotent: true, maxAttempts: 1 },
+        { id: 'never', kind: 'noop', idempotent: true },
+      ])
+      // Only the first step fails. A scripted handler is shared across every
+      // step and consults each step's own attempt counter, so scripting a
+      // failure there fails both of them.
+      const handler = scriptedHandler({
+        failures: [],
+        onInvoke: (ctx) => {
+          if (ctx.node.id === 'fails') throw new StepFailure('nope', permanent)
+        },
+      })
+
+      const run = await start(flow)
+      await drainUntilQuiet(pool, deps(flow, { noop: handler }), { tenantId })
+
+      const finished = await getRun(pool, run.startedAt, run.id)
+      assert.equal(finished?.status, 'failed')
+
+      const steps = await listSteps(pool, run)
+      const never = steps.find((s) => s.nodeId === 'never')
+      assert.equal(never?.status, 'pending', 'a failed step must not advance the run')
+      assert.equal(never?.startedAt, null)
+      assert.equal(never?.finishedAt, null)
+      assert.equal(never?.durationMs, null)
+    })
+
+    it('does not run the rest of the chain after a step fails for good', async () => {
+      // The bug this pins: a terminally failed step is not runnable, so the
+      // "next runnable step" was the one after it, and the chain carried on.
+      // The run still ended up `failed`, because the terminal failure is found
+      // once nothing is runnable — by which point every later step had already
+      // executed. A flow where that is "charge the card" then "send the
+      // receipt" sends a receipt for a charge that did not happen.
+      const ran: string[] = []
+      const flow = makeFlow([
+        { id: 'charge', kind: 'noop', idempotent: false, maxAttempts: 1 },
+        { id: 'receipt', kind: 'noop', idempotent: true },
+        { id: 'ledger', kind: 'noop', idempotent: true },
+      ])
+      const handler = scriptedHandler({
+        failures: [],
+        onInvoke: (ctx) => {
+          ran.push(ctx.node.id)
+          if (ctx.node.id === 'charge') throw new StepFailure('declined', { httpStatus: 402 })
+        },
+      })
+
+      const run = await start(flow)
+      await drainUntilQuiet(pool, deps(flow, { noop: handler }), { tenantId })
+
+      assert.deepEqual(ran, ['charge'], 'nothing after the failure may run')
+
+      const finished = await getRun(pool, run.startedAt, run.id)
+      assert.equal(finished?.status, 'failed')
+      assert.equal(finished?.stepsSucceeded, 0)
+
+      const steps = await listSteps(pool, run)
+      assert.equal(steps.find((s) => s.nodeId === 'receipt')?.status, 'pending')
+      assert.equal(steps.find((s) => s.nodeId === 'ledger')?.status, 'pending')
+    })
+
+    it('still runs the rest of the chain while a failed step is only waiting to retry', async () => {
+      // The other side of the same guard. A failure with a retry pending is
+      // not terminal, so the chain is waiting rather than abandoned — and the
+      // step itself must still come back.
+      const ran: string[] = []
+      const flow = makeFlow([
+        { id: 'flaky', kind: 'noop', idempotent: true, maxAttempts: 3 },
+        { id: 'after', kind: 'noop', idempotent: true },
+      ])
+      // Scoped to the one node: a scripted handler is shared across every step
+      // and reads each step's own attempt counter, so a failure in `failures`
+      // fails the first attempt of every step in the flow.
+      const handler = scriptedHandler({
+        failures: [],
+        onInvoke: (ctx) => {
+          ran.push(ctx.node.id)
+          if (ctx.node.id === 'flaky' && ctx.step.attemptsStarted === 1) {
+            throw new StepFailure('reset', { code: 'ECONNRESET' })
+          }
+        },
+      })
+
+      const run = await start(flow)
+      await drainUntilQuiet(pool, deps(flow, { noop: handler }), { tenantId })
+
+      const finished = await getRun(pool, run.startedAt, run.id)
+      assert.equal(finished?.status, 'succeeded')
+      assert.deepEqual(ran, ['flaky', 'flaky', 'after'])
     })
 
     it('makes upstream outputs visible to later steps', async () => {

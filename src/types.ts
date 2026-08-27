@@ -101,6 +101,19 @@ export interface StepRow {
   readonly errorClass: string | null
   readonly errorCode: string | null
   readonly errorMessage: string | null
+
+  /** When the step was first claimed. Not reset by a retry. */
+  readonly startedAt: Date | null
+  readonly finishedAt: Date | null
+  /**
+   * Elapsed time from the first claim to the finish.
+   *
+   * Wall clock, so it includes the waiting between retries, not just the
+   * attempt that eventually worked. That is the number that answers "why was
+   * this run slow" — a step that succeeded on its fourth try after two minutes
+   * of backoff took two minutes, however brief the successful call was.
+   */
+  readonly durationMs: number | null
 }
 
 export type OutboxTopic = 'advance_run' | 'run_step'

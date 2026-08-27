@@ -295,7 +295,8 @@ const STEP_COLUMNS = `
   step_kind, status, attempts_started, attempts_consumed, deferrals,
   max_attempts, max_deferrals, next_attempt_at, idempotency_key,
   lease_expires_at, worker_id, input_inline, output_inline,
-  error_class, error_code, error_message
+  error_class, error_code, error_message,
+  started_at, finished_at, duration_ms
 `
 
 function toStep(row: Record<string, unknown>): StepRow {
@@ -323,6 +324,9 @@ function toStep(row: Record<string, unknown>): StepRow {
     errorClass: (row.error_class as string | null) ?? null,
     errorCode: (row.error_code as string | null) ?? null,
     errorMessage: (row.error_message as string | null) ?? null,
+    startedAt: (row.started_at as Date | null) ?? null,
+    finishedAt: (row.finished_at as Date | null) ?? null,
+    durationMs: (row.duration_ms as number | null) ?? null,
   }
 }
 
@@ -332,6 +336,19 @@ function toStep(row: Record<string, unknown>): StepRow {
  * Linear chains, so "next" is the lowest topo_order that is not finished. A
  * step waiting on a retry that is not yet due counts as unfinished but is not
  * returned — the run is not advanced, it is waiting.
+ *
+ * The NOT EXISTS is the important half, and its absence was a real bug: a step
+ * that has failed for good is not runnable, so without the guard this simply
+ * moved on to the next pending step and ran it. The run still ended up marked
+ * `failed` — `finishOrWait` finds the terminal failure — but only once nothing
+ * was runnable, which is to say after the entire rest of the chain had already
+ * executed. In a real flow that is the charge failing and the receipt going
+ * out anyway.
+ *
+ * A step whose retry is merely not due yet is deliberately not a blocker: it
+ * has `next_attempt_at` set, it is coming back, and the chain is waiting for
+ * it rather than abandoned. That distinction is exactly `next_attempt_at IS
+ * NULL`, which is what makes a failure terminal.
  */
 export async function nextRunnableStep(
   tx: Executor,
@@ -339,12 +356,22 @@ export async function nextRunnableStep(
 ): Promise<StepRow | null> {
   const { rows } = await tx.query(
     `SELECT ${STEP_COLUMNS}
-       FROM step_executions
-      WHERE run_started_at = $1 AND run_id = $2
-        AND (status = 'pending'
-             OR (status = 'failed' AND next_attempt_at IS NOT NULL AND next_attempt_at <= now())
-             OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < now()))
-      ORDER BY topo_order
+       FROM step_executions s
+      WHERE s.run_started_at = $1 AND s.run_id = $2
+        AND (s.status = 'pending'
+             OR (s.status = 'failed' AND s.next_attempt_at IS NOT NULL AND s.next_attempt_at <= now())
+             OR (s.status = 'running' AND s.lease_expires_at IS NOT NULL AND s.lease_expires_at < now()))
+        AND NOT EXISTS (
+          SELECT 1
+            FROM step_executions blocker
+           WHERE blocker.run_started_at = s.run_started_at
+             AND blocker.run_id = s.run_id
+             AND blocker.topo_order < s.topo_order
+             AND (blocker.status = 'timed_out'
+                  OR blocker.status = 'cancelled'
+                  OR (blocker.status = 'failed' AND blocker.next_attempt_at IS NULL))
+        )
+      ORDER BY s.topo_order
       LIMIT 1`,
     [run.startedAt, run.id],
   )
