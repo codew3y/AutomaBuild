@@ -710,6 +710,44 @@ async function registerCanvas(app: FastifyInstance, config: AppConfig): Promise<
  * exited 1. A server that dies in silence is the worst possible failure mode:
  * there is nothing to search for and nothing to act on.
  */
+/**
+ * Say, at startup, whether email will work and where it will go.
+ *
+ * Without this the email step reports itself unconfigured for the first time
+ * on the first run that reaches it — which is after a webhook has been
+ * accepted and a run created, and reads as a flow problem rather than a
+ * missing environment variable.
+ *
+ * The password is never printed, and its absence is not treated as an error:
+ * plenty of relays authenticate by IP.
+ */
+export function describeEmail(env: NodeJS.ProcessEnv = process.env): string {
+  const host = env.SMTP_HOST
+  if (host === undefined || host === '') {
+    return '    email    not configured — set SMTP_HOST to send'
+  }
+
+  const port = env.SMTP_PORT ?? '587'
+  const from = env.SMTP_FROM ?? '(SMTP_FROM is not set — the server will refuse to start)'
+  const allowed = (env.SMTP_ALLOWED_RECIPIENTS ?? '').trim()
+
+  const lines = [`    email    ${host}:${port} as ${from}`]
+
+  if (allowed === '') {
+    // The open-relay condition, stated as such. A flow's recipient comes from
+    // a webhook body, so an unrestricted relay lets whoever can reach the
+    // endpoint choose who this server writes to.
+    lines.push(
+      '             WARNING: SMTP_ALLOWED_RECIPIENTS is not set, so this will',
+      '             send anywhere a published flow names.',
+    )
+  } else {
+    lines.push(`             will only send to ${allowed}`)
+  }
+
+  return lines.join(NEWLINE)
+}
+
 const NEWLINE = String.fromCharCode(10)
 
 export function describeStartupFailure(error: unknown): string {
@@ -748,7 +786,9 @@ if (process.argv[1]?.endsWith('server.ts')) {
       console.log(`\n  AutomaBuild is running.`)
       console.log(`    UI       http://localhost:${config.port}/`)
       console.log(`    webhook  POST http://localhost:${config.port}/webhooks/${config.endpointId}`)
-      console.log(`    runs     http://localhost:${config.port}/api/runs\n`)
+      console.log(`    runs     http://localhost:${config.port}/api/runs`)
+      console.log(describeEmail())
+      console.log()
     })
     .catch((error: unknown) => {
       console.error(describeStartupFailure(error))
