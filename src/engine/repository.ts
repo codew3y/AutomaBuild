@@ -439,7 +439,17 @@ export interface RecordFailureInput {
   readonly status: Extract<StepStatus, 'failed' | 'timed_out' | 'waiting_confirmation'>
   readonly attemptsConsumed: number
   readonly deferrals: number
-  readonly nextAttemptAt: Date | null
+  /**
+   * Delay until the next attempt, or null when there will not be one.
+   *
+   * A duration rather than an instant, deliberately. The instant is computed
+   * by Postgres as `now() + delay`, so every wake time in the system comes
+   * from one clock. Sending an absolute timestamp from Node would introduce a
+   * second clock, and delayed work is scored against absolute timestamps —
+   * two nodes disagreeing by a few seconds means steps firing early or late
+   * with nothing in any log to explain it.
+   */
+  readonly retryDelayMs: number | null
   readonly errorClass: string
   readonly errorCode?: string
   readonly errorMessage?: string
@@ -463,7 +473,8 @@ export async function recordFailure(
         SET status = $4,
             attempts_consumed = $5,
             deferrals = $6,
-            next_attempt_at = $7,
+            next_attempt_at = CASE WHEN $7::bigint IS NULL THEN NULL
+                                   ELSE now() + ($7::bigint * interval '1 millisecond') END,
             error_class = $8,
             error_code = $9,
             error_message = $10,
@@ -479,7 +490,7 @@ export async function recordFailure(
       input.status,
       input.attemptsConsumed,
       input.deferrals,
-      input.nextAttemptAt,
+      input.retryDelayMs,
       input.errorClass,
       input.errorCode ?? null,
       input.errorMessage ?? null,
@@ -501,22 +512,99 @@ export async function listSteps(
   return rows.map(toStep)
 }
 
+/* -------------------------------------------------------------------- dlq */
+
+export interface DlqInput {
+  readonly tenantId: string
+  readonly runId?: string
+  readonly runStartedAt?: Date
+  readonly stepExecutionId?: string
+  readonly flowVersionId?: string
+  readonly nodeId?: string
+  readonly originTopic: string
+  readonly reason:
+    | 'attempts_exhausted'
+    | 'deferrals_exhausted'
+    | 'poison'
+    | 'deserialize_failed'
+    | 'flow_poison'
+  readonly errorClass?: string
+  readonly errorChain?: unknown
+  /**
+   * Everything needed to run this again without reconstructing it by hand.
+   * A DLQ entry that cannot be replayed is a log line with extra steps.
+   */
+  readonly replayPayload: Record<string, unknown>
+}
+
+export async function writeDlqEntry(tx: Executor, input: DlqInput): Promise<string> {
+  const { rows } = await tx.query<{ id: string }>(
+    `INSERT INTO dlq_entries
+       (tenant_id, run_id, run_started_at, step_execution_id, flow_version_id,
+        node_id, origin_topic, reason, error_class, error_chain, replay_payload)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     RETURNING id`,
+    [
+      input.tenantId,
+      input.runId ?? null,
+      input.runStartedAt ?? null,
+      input.stepExecutionId ?? null,
+      input.flowVersionId ?? null,
+      input.nodeId ?? null,
+      input.originTopic,
+      input.reason,
+      input.errorClass ?? null,
+      input.errorChain === undefined ? null : JSON.stringify(input.errorChain),
+      JSON.stringify(input.replayPayload),
+    ],
+  )
+  return rows[0]!.id
+}
+
+export async function listDlqEntries(
+  tx: Executor,
+  filter: { runId?: string; tenantId?: string } = {},
+): Promise<
+  Array<{ id: string; reason: string; errorClass: string | null; replayPayload: unknown; nodeId: string | null }>
+> {
+  const { rows } = await tx.query(
+    `SELECT id, reason, error_class, replay_payload, node_id
+       FROM dlq_entries
+      WHERE ($1::uuid IS NULL OR run_id = $1)
+        AND ($2::uuid IS NULL OR tenant_id = $2)
+      ORDER BY created_at DESC`,
+    [filter.runId ?? null, filter.tenantId ?? null],
+  )
+  return rows.map((row) => ({
+    id: row.id as string,
+    reason: row.reason as string,
+    errorClass: (row.error_class as string | null) ?? null,
+    replayPayload: row.replay_payload,
+    nodeId: (row.node_id as string | null) ?? null,
+  }))
+}
+
 /* ----------------------------------------------------------------- outbox */
 
 export interface EnqueueInput {
   readonly topic: OutboxTopic
   readonly payload: Record<string, unknown>
   readonly tenantId?: string | null
-  /** Defaults to now. A future value is how a retry is scheduled. */
-  readonly availableAt?: Date
+  /**
+   * Milliseconds to hold the row back, computed into an instant by Postgres.
+   * This is how a retry is scheduled without a separate timer.
+   */
+  readonly delayMs?: number
 }
 
 export async function enqueue(tx: Executor, input: EnqueueInput): Promise<string> {
   const { rows } = await tx.query<{ id: string }>(
     `INSERT INTO outbox (topic, payload, tenant_id, available_at)
-     VALUES ($1, $2, $3, COALESCE($4, now()))
+     VALUES ($1, $2, $3,
+             CASE WHEN $4::bigint IS NULL THEN now()
+                  ELSE now() + ($4::bigint * interval '1 millisecond') END)
      RETURNING id::text`,
-    [input.topic, JSON.stringify(input.payload), input.tenantId ?? null, input.availableAt ?? null],
+    [input.topic, JSON.stringify(input.payload), input.tenantId ?? null, input.delayMs ?? null],
   )
   return rows[0]!.id
 }
@@ -532,15 +620,17 @@ export async function enqueue(tx: Executor, input: EnqueueInput): Promise<string
 export async function claimOutboxBatch(
   tx: Executor,
   limit: number,
+  tenantId?: string,
 ): Promise<OutboxMessage[]> {
   const { rows } = await tx.query(
     `SELECT id::text AS id, topic, payload, tenant_id, attempts
        FROM outbox
       WHERE available_at <= now()
+        AND ($2::uuid IS NULL OR tenant_id = $2)
       ORDER BY id
       FOR UPDATE SKIP LOCKED
       LIMIT $1`,
-    [limit],
+    [limit, tenantId ?? null],
   )
   return rows.map((row) => ({
     id: row.id as string,

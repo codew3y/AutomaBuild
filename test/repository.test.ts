@@ -292,7 +292,6 @@ describe('repository', { skip: SKIP }, () => {
         }),
       )
 
-      const nextAttemptAt = new Date(Date.now() + 30_000)
       await withTransaction(pool, (tx) =>
         recordFailure(tx, {
           runStartedAt: run.startedAt,
@@ -301,7 +300,7 @@ describe('repository', { skip: SKIP }, () => {
           status: 'failed',
           attemptsConsumed: 0,
           deferrals: 3,
-          nextAttemptAt,
+          retryDelayMs: 30_000,
           errorClass: 'rate_limited',
         }),
       )
@@ -362,7 +361,7 @@ describe('repository', { skip: SKIP }, () => {
           status: 'failed',
           attemptsConsumed: 1,
           deferrals: 0,
-          nextAttemptAt: new Date(Date.now() + 60_000),
+          retryDelayMs: 60_000,
           errorClass: 'transient_network',
         })
       })
@@ -387,7 +386,7 @@ describe('repository', { skip: SKIP }, () => {
           status: 'failed',
           attemptsConsumed: 1,
           deferrals: 0,
-          nextAttemptAt: new Date(Date.now() - 1_000),
+          retryDelayMs: -1_000,
           errorClass: 'transient_network',
         })
       })
@@ -437,7 +436,7 @@ describe('repository', { skip: SKIP }, () => {
           topic: 'run_step',
           payload: { marker },
           tenantId,
-          availableAt: new Date(Date.now() + 60_000),
+          delayMs: 60_000,
         }),
       )
 

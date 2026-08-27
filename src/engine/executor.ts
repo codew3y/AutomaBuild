@@ -1,0 +1,311 @@
+/**
+ * The executor runs one step attempt and records what happened.
+ *
+ * The shape that matters: claim in a transaction, execute *outside* any
+ * transaction, then record in a second transaction. Holding a database
+ * transaction open across a network call would pin a connection for the
+ * duration of someone else's outage, and a pool of ten dies to one slow
+ * provider.
+ *
+ * The cost of that shape is a window: the work can happen and the process die
+ * before the result is written. That window is exactly why idempotency keys
+ * exist, and why the retry presents the same one.
+ */
+
+import type { Pool } from 'pg'
+import { withTransaction } from '../db/client.ts'
+import { classify, type FailureFacts } from '../classify.ts'
+import { DEFAULT_BACKOFF, type BackoffPolicy } from '../backoff.ts'
+import { onAttemptFailed, type StepRetryState } from '../retry.ts'
+import { systemRandom, type Random } from '../random.ts'
+import { DEFAULT_TIMEOUTS, type TimeoutConfig } from '../timeouts.ts'
+import {
+  claimStep,
+  enqueue,
+  getRun,
+  listSteps,
+  recordFailure,
+  recordSuccess,
+  writeDlqEntry,
+} from './repository.ts'
+import { StepFailure, type HandlerRegistry, type StepContext } from './handlers.ts'
+import type { FlowDefinition, StepRow } from '../types.ts'
+
+export interface ExecutorDeps {
+  readonly handlers: HandlerRegistry
+  readonly flow: FlowDefinition
+  readonly workerId: string
+  readonly random?: Random
+  readonly backoff?: BackoffPolicy
+  readonly timeouts?: TimeoutConfig
+}
+
+export type StepOutcome =
+  | { readonly kind: 'not_claimed' }
+  | { readonly kind: 'succeeded'; readonly stepId: string }
+  | { readonly kind: 'retry_scheduled'; readonly stepId: string; readonly delayMs: number }
+  | { readonly kind: 'dead_lettered'; readonly stepId: string; readonly reason: string }
+  | { readonly kind: 'paused'; readonly stepId: string }
+  | { readonly kind: 'failed'; readonly stepId: string; readonly errorClass: string }
+
+export interface RunStepInput {
+  readonly runId: string
+  readonly runStartedAt: Date
+  readonly stepId: string
+}
+
+export async function runStep(
+  pool: Pool,
+  input: RunStepInput,
+  deps: ExecutorDeps,
+): Promise<StepOutcome> {
+  const timeouts = deps.timeouts ?? DEFAULT_TIMEOUTS
+  const policy = deps.backoff ?? DEFAULT_BACKOFF
+  const random = deps.random ?? systemRandom
+
+  // 1. Claim. If someone else holds it, this delivery was a duplicate and the
+  //    correct behaviour is to do nothing at all.
+  const claimed = await withTransaction(pool, (tx) =>
+    claimStep(tx, {
+      runStartedAt: input.runStartedAt,
+      stepId: input.stepId,
+      workerId: deps.workerId,
+      leaseMs: timeouts.stepAttemptMs * 2,
+    }),
+  )
+  if (claimed === null) return { kind: 'not_claimed' }
+
+  const context = await buildContext(pool, claimed, deps, timeouts)
+
+  // 2. Execute, outside any transaction.
+  const handler = deps.handlers[claimed.stepKind]
+  let output: unknown
+  let failure: FailureFacts | null = null
+  let failureMessage = ''
+
+  if (handler === undefined) {
+    failure = { deterministicallyBroken: true }
+    failureMessage = `no handler registered for step kind ${JSON.stringify(claimed.stepKind)}`
+  } else {
+    try {
+      const result = await handler(context.ctx)
+      output = result.output
+    } catch (error) {
+      failureMessage = (error as Error).message
+      failure =
+        error instanceof StepFailure
+          ? error.facts
+          : // Anything that escapes a handler without describing itself is our
+            // bug until proven otherwise. Assuming it is a transient network
+            // fault would retry things that will never work.
+            { internal: true }
+    } finally {
+      context.dispose()
+    }
+  }
+
+  // 3. Record, in a second transaction, along with whatever comes next.
+  if (failure === null) {
+    return withTransaction(pool, async (tx) => {
+      const wrote = await recordSuccess(tx, {
+        runStartedAt: input.runStartedAt,
+        stepId: input.stepId,
+        workerId: deps.workerId,
+        output,
+      })
+      // The lease lapsed mid-step and someone else owns it now. Our result is
+      // stale; writing it would overwrite whatever they are doing.
+      if (!wrote) return { kind: 'not_claimed' }
+
+      await tx.query(
+        `UPDATE runs SET steps_succeeded = steps_succeeded + 1 WHERE started_at = $1 AND id = $2`,
+        [input.runStartedAt, input.runId],
+      )
+      await enqueueAdvance(tx, input, claimed.tenantId)
+      return { kind: 'succeeded', stepId: input.stepId }
+    })
+  }
+
+  const errorClass = classify(failure)
+  const state: StepRetryState = {
+    attemptsStarted: claimed.attemptsStarted,
+    attemptsConsumed: claimed.attemptsConsumed,
+    deferrals: claimed.deferrals,
+  }
+  const decision = onAttemptFailed(
+    state,
+    {
+      errorClass,
+      idempotent: nodeFor(deps.flow, claimed).idempotent,
+      retryAfterMs: failure.retryAfterMs ?? null,
+    },
+    { now: Date.now(), random, policy: withStepLimits(policy, claimed) },
+  )
+
+  return withTransaction(pool, async (tx) => {
+    const common = {
+      runStartedAt: input.runStartedAt,
+      stepId: input.stepId,
+      workerId: deps.workerId,
+      attemptsConsumed: decision.state.attemptsConsumed,
+      deferrals: decision.state.deferrals,
+      errorClass,
+      errorMessage: failureMessage.slice(0, 2000),
+      ...(failure.httpStatus === undefined ? {} : { httpStatus: failure.httpStatus }),
+    }
+
+    if (decision.kind === 'retry') {
+      const wrote = await recordFailure(tx, {
+        ...common,
+        status: 'failed',
+        retryDelayMs: decision.delayMs,
+      })
+      if (!wrote) return { kind: 'not_claimed' }
+      // The run is advanced when the retry comes due, not now.
+      await enqueueAdvance(tx, input, claimed.tenantId, decision.delayMs)
+      return { kind: 'retry_scheduled', stepId: input.stepId, delayMs: decision.delayMs }
+    }
+
+    if (decision.kind === 'terminal' && decision.action === 'pause_for_confirmation') {
+      const wrote = await recordFailure(tx, {
+        ...common,
+        status: 'waiting_confirmation',
+        retryDelayMs: null,
+      })
+      if (!wrote) return { kind: 'not_claimed' }
+      await enqueueAdvance(tx, input, claimed.tenantId)
+      return { kind: 'paused', stepId: input.stepId }
+    }
+
+    const wrote = await recordFailure(tx, { ...common, status: 'failed', retryDelayMs: null })
+    if (!wrote) return { kind: 'not_claimed' }
+
+    await tx.query(
+      `UPDATE runs SET steps_failed = steps_failed + 1 WHERE started_at = $1 AND id = $2`,
+      [input.runStartedAt, input.runId],
+    )
+
+    // Against the step's own limits, not the instance default: a node
+    // configured with maxAttempts 3 exhausts at 3, and reporting that as
+    // "deferrals_exhausted" would send whoever reads the DLQ hunting a rate
+    // limit that never happened.
+    const stepLimits = withStepLimits(policy, claimed)
+    const dlqReason =
+      decision.kind === 'exhausted'
+        ? decision.state.attemptsConsumed >= stepLimits.maxAttempts
+          ? 'attempts_exhausted'
+          : 'deferrals_exhausted'
+        : errorClass === 'poison'
+          ? 'poison'
+          : null
+
+    if (dlqReason !== null) {
+      await writeDlqEntry(tx, {
+        tenantId: claimed.tenantId,
+        runId: input.runId,
+        runStartedAt: input.runStartedAt,
+        stepExecutionId: input.stepId,
+        flowVersionId: deps.flow.versionId,
+        nodeId: claimed.nodeId,
+        originTopic: 'run_step',
+        reason: dlqReason,
+        errorClass,
+        errorChain: [{ message: failureMessage, errorClass }],
+        replayPayload: {
+          runId: input.runId,
+          runStartedAt: input.runStartedAt.toISOString(),
+          stepId: input.stepId,
+          nodeId: claimed.nodeId,
+          stepKind: claimed.stepKind,
+          idempotencyKey: claimed.idempotencyKey,
+          input: claimed.inputInline,
+          flowVersionId: deps.flow.versionId,
+        },
+      })
+      await enqueueAdvance(tx, input, claimed.tenantId)
+      return { kind: 'dead_lettered', stepId: input.stepId, reason: dlqReason }
+    }
+
+    await enqueueAdvance(tx, input, claimed.tenantId)
+    return { kind: 'failed', stepId: input.stepId, errorClass }
+  })
+}
+
+/**
+ * Schedule the run to be looked at again.
+ *
+ * The tenant is not optional. A worker pool dedicated to one tenant claims by
+ * tenant_id, so an untagged message is invisible to it — every run would stall
+ * silently after its first step, with the work sitting in the outbox looking
+ * perfectly healthy.
+ */
+function enqueueAdvance(
+  tx: Parameters<typeof enqueue>[0],
+  input: RunStepInput,
+  tenantId: string,
+  delayMs?: number,
+): Promise<string> {
+  return enqueue(tx, {
+    topic: 'advance_run',
+    payload: { runId: input.runId, runStartedAt: input.runStartedAt.toISOString() },
+    tenantId,
+    ...(delayMs === undefined ? {} : { delayMs }),
+  })
+}
+
+function nodeFor(flow: FlowDefinition, step: StepRow) {
+  const node = flow.nodes.find((candidate) => candidate.id === step.nodeId)
+  if (node === undefined) {
+    // A step whose node has vanished from the flow version cannot be executed
+    // and cannot be repaired by retrying.
+    return { id: step.nodeId, kind: step.stepKind, idempotent: false }
+  }
+  return node
+}
+
+/** Per-step limits override the instance policy, so one node can be stricter. */
+function withStepLimits(policy: BackoffPolicy, step: StepRow): BackoffPolicy {
+  return {
+    ...policy,
+    maxAttempts: step.maxAttempts,
+    maxDeferrals: step.maxDeferrals,
+  }
+}
+
+async function buildContext(
+  pool: Pool,
+  step: StepRow,
+  deps: ExecutorDeps,
+  timeouts: TimeoutConfig,
+): Promise<{ ctx: StepContext; dispose: () => void }> {
+  const run = await withTransaction(pool, (tx) => getRun(tx, step.runStartedAt, step.runId))
+  const priorSteps = await withTransaction(pool, (tx) =>
+    listSteps(tx, { id: step.runId, startedAt: step.runStartedAt }),
+  )
+
+  const upstream: Record<string, unknown> = {}
+  for (const prior of priorSteps) {
+    // Includes steps skipped by a resume: their recorded outputs must stay
+    // resolvable or downstream mappings break.
+    if (prior.status === 'succeeded' || prior.status === 'skipped_resumed') {
+      upstream[prior.nodeId] = prior.outputInline
+    }
+  }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeouts.stepAttemptMs)
+  timer.unref?.()
+
+  return {
+    ctx: {
+      run: run!,
+      step,
+      node: nodeFor(deps.flow, step),
+      idempotencyKey: step.idempotencyKey,
+      upstream,
+      signal: controller.signal,
+      deadlineMs: timeouts.stepAttemptMs,
+    },
+    dispose: () => clearTimeout(timer),
+  }
+}

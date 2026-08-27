@@ -31,6 +31,13 @@ export interface FailureFacts {
   readonly refreshAlreadyAttempted?: boolean
   /** The error escaped our own code rather than the provider's. */
   readonly internal?: boolean
+  /**
+   * Parsed from the provider's `Retry-After`, when it sent one.
+   *
+   * Carried alongside the facts rather than derived later, because only the
+   * handler ever sees the response headers.
+   */
+  readonly retryAfterMs?: number | null
 }
 
 const TRANSIENT_CODES = new Set([
