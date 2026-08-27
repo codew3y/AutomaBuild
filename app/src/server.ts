@@ -49,6 +49,7 @@ import {
   withTransaction,
   installSignalHandlers,
   type FlowDefinition,
+  type WorkerEvent,
 } from 'automa-durable-runner'
 
 import { randomUUID } from 'node:crypto'
@@ -261,10 +262,12 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
             handlers: mappingHandlers(),
             workerId: `web-${process.pid}`,
           },
-          // No tenant filter: one worker serves every tenant, and isolation
-          // is the engine's, enforced on every query rather than by which
-          // process happens to be running.
-          {},
+          {
+            // No tenant filter: one worker serves every tenant, and isolation
+            // is the engine's, enforced on every query rather than by which
+            // process happens to be running.
+            onEvent: reportWorkerEvent(),
+          },
         )
 
   const uninstall = worker === null ? () => {} : installSignalHandlers(worker)
@@ -710,6 +713,54 @@ async function registerCanvas(app: FastifyInstance, config: AppConfig): Promise<
  * exited 1. A server that dies in silence is the worst possible failure mode:
  * there is nothing to search for and nothing to act on.
  */
+/**
+ * Report what the worker is doing, and above all when it fails.
+ *
+ * `startWorker`'s default `onEvent` is a no-op, so a worker given none fails
+ * completely silently: the loop catches every error to keep itself alive, emits
+ * it, and nobody is listening. The symptom is a server that answers every HTTP
+ * request perfectly while no run ever leaves `running` — which is precisely
+ * what happened here, and there was nothing in any log to explain it.
+ *
+ * Errors are collapsed while they repeat. A failing pass retries every second,
+ * so printing each one buries the first occurrence — which is the one that
+ * says what actually broke — under thousands of copies.
+ */
+function reportWorkerEvent(): (event: WorkerEvent) => void {
+  let lastError: string | null = null
+  let repeats = 0
+
+  return (event: WorkerEvent) => {
+    if (event.type === 'error') {
+      const message = event.error.message
+      if (message === lastError) {
+        repeats++
+        // Powers of ten, so a persistent fault stays visible without drowning
+        // everything else.
+        if (repeats % 100 !== 0) return
+        console.error(`worker error (x${repeats}): ${message}`)
+        return
+      }
+      lastError = message
+      repeats = 1
+      console.error(`worker error: ${message}`)
+      if (event.error.stack !== undefined) console.error(event.error.stack)
+      return
+    }
+
+    // Anything that is not an error means the loop recovered, so the next
+    // failure should print in full rather than being collapsed into the last.
+    lastError = null
+
+    if (event.type === 'started') console.log(`worker ${event.workerId} started`)
+    if (event.type === 'stopping') console.log(`worker stopping: ${event.reason}`)
+    if (event.type === 'stopped') console.log(`worker stopped (${event.inFlight} in flight)`)
+    if (event.type === 'swept' && event.rescheduled > 0) {
+      console.log(`janitor rescheduled ${event.rescheduled} step(s)`)
+    }
+  }
+}
+
 /**
  * Say, at startup, whether email will work and where it will go.
  *
