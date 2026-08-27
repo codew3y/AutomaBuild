@@ -1460,7 +1460,48 @@ function MappingPanel({
   const target = focusedField?.nodeId === nodeId ? focusedField.field : activeField
   const targetValue = String(data[target] ?? '')
 
-  const leaves = useMemo(() => outputTree(available), [available])
+  /**
+   * The upstream steps that actually produced something, in flow order.
+   *
+   * Flow order rather than the order `ancestors` happens to return, because a
+   * dropdown that reshuffles between renders is one nobody can build a habit
+   * with. The label is what a person named the step; the id is the fallback
+   * for a step they never renamed.
+   */
+  const sources = useMemo(() => {
+    const upstream = ancestors({ nodes, edges }, nodeId)
+    return nodes
+      .filter((node) => upstream.has(node.id) && allOutputs[node.id] !== undefined)
+      .map((node) => ({ id: node.id, label: String(node.data?.label ?? node.id) }))
+  }, [nodes, edges, nodeId, allOutputs])
+
+  /**
+   * Which step's fields to show.
+   *
+   * Defaults to the nearest one, which is almost always what a mapping refers
+   * to — you reshape what the step before you just produced far more often
+   * than something five steps back. Empty string means all of them.
+   */
+  const [source, setSource] = useState<string | null>(null)
+  const activeSource = source ?? sources[sources.length - 1]?.id ?? ''
+
+  // A step that was renamed or deleted must not leave the picker pointing at
+  // something that is no longer there, showing an empty tree with no clue why.
+  useEffect(() => {
+    if (source !== null && source !== '' && !sources.some((entry) => entry.id === source)) {
+      setSource(null)
+    }
+  }, [source, sources])
+
+  const allLeaves = useMemo(() => outputTree(available), [available])
+
+  const leaves = useMemo(
+    () =>
+      activeSource === ''
+        ? allLeaves
+        : allLeaves.filter((leaf) => leaf.path.startsWith(`${activeSource}.`)),
+    [allLeaves, activeSource],
+  )
   const currentValue = targetValue
   const preview = useMemo(
     () => resolveTemplate(currentValue, available),
@@ -1529,6 +1570,24 @@ function MappingPanel({
         Available from earlier steps
         <span className="tree-source muted">{live ? "from the last run" : "sample data"}</span>
       </h2>
+
+      {sources.length > 0 && (
+        <label className="field">
+          <span>from step</span>
+          <select value={activeSource} onChange={(event) => setSource(event.target.value)}>
+            {sources.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {entry.label}
+                {entry.label === entry.id ? '' : ` (${entry.id})`}
+              </option>
+            ))}
+            {/* Kept last: it is the escape hatch, not the starting point. With
+                several steps upstream the combined tree is long enough that
+                finding anything in it is worse than picking a step first. */}
+            <option value="">all steps ({sources.length})</option>
+          </select>
+        </label>
+      )}
 
       {/* Naming the steps with no data is the difference between "this step
           produces nothing" and "this step has not run yet" — the second is
