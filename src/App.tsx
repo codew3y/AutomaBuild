@@ -52,12 +52,153 @@ const editorStore = createEditorStore()
 
 const DRAFT_KEY = 'automa-flow-canvas:draft'
 
+export interface EndpointSummary {
+  readonly endpointId: string
+  readonly flowId: string
+  readonly scheme: string
+  readonly disabled: boolean
+  readonly isDefault: boolean
+  /** Where each secret lives — never the secret itself. */
+  readonly secretSources: readonly string[]
+  readonly secretProblems: readonly string[]
+}
+
 export interface WebhookInfo {
   readonly url: string
   readonly endpointId: string
   readonly scheme: string
   readonly signatureHeader: string
   readonly secretConfigured: boolean
+}
+
+/**
+ * The endpoints this tenant receives on.
+ *
+ * Creating one takes a *reference* to a secret rather than a secret. That is
+ * not friction for its own sake: a form that accepts a raw value would put it
+ * in a request body, a proxy log and the database in one move, and the whole
+ * reference scheme exists so the database does not hold credentials.
+ */
+function EndpointsDialog({
+  endpoints,
+  onClose,
+  onCreated,
+}: {
+  readonly endpoints: readonly EndpointSummary[]
+  readonly onClose: () => void
+  readonly onCreated: () => void
+}) {
+  const [scheme, setScheme] = useState('stripe')
+  const [secretRef, setSecretRef] = useState('env:')
+  const [error, setError] = useState<string | null>(null)
+  const [creating, setCreating] = useState(false)
+
+  const create = () => {
+    setCreating(true)
+    setError(null)
+    apiFetch('api/endpoints', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ scheme, secretRefs: [secretRef.trim()] }),
+    })
+      .then(async (response) => {
+        const data = (await response.json()) as { error?: string }
+        if (!response.ok) throw new Error(data.error ?? `failed (${response.status})`)
+        setSecretRef('env:')
+        onCreated()
+      })
+      .catch((problem: unknown) => {
+        setError(problem instanceof Error ? problem.message : String(problem))
+      })
+      .finally(() => setCreating(false))
+  }
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="dialog" role="dialog" aria-modal="true" aria-label="Endpoints">
+        <header className="dialog-header">
+          <div>
+            <strong>Endpoints</strong>
+            <span className="muted"> where webhooks arrive</span>
+          </div>
+          <button className="dismiss" onClick={onClose} aria-label="Close" title="Close (Esc)">
+            ✕
+          </button>
+        </header>
+
+        <div className="dialog-body">
+          <ul className="endpoint-list">
+            {endpoints.map((endpoint) => (
+              <li key={endpoint.endpointId} className={endpoint.disabled ? 'is-disabled' : undefined}>
+                <div className="endpoint-row">
+                  <code>{endpoint.endpointId}</code>
+                  {endpoint.isDefault && <span className="tag">default</span>}
+                  {endpoint.disabled && <span className="tag tag-off">disabled</span>}
+                </div>
+                <div className="muted endpoint-row-meta">
+                  {endpoint.scheme} · secret from{' '}
+                  {endpoint.secretSources.map((source, index) => (
+                    <span
+                      key={source + String(index)}
+                      className={source.startsWith('literal') ? 'endpoint-warn' : undefined}
+                    >
+                      {index > 0 ? ', ' : ''}
+                      {source}
+                    </span>
+                  ))}
+                </div>
+                {endpoint.secretProblems.map((problem) => (
+                  <div key={problem} className="endpoint-warn endpoint-row-meta">
+                    {problem}
+                  </div>
+                ))}
+              </li>
+            ))}
+          </ul>
+
+          <h3>Add one</h3>
+          <label className="field">
+            <span>scheme</span>
+            <select value={scheme} onChange={(event) => setScheme(event.target.value)}>
+              <option value="stripe">stripe</option>
+              <option value="github">github</option>
+              <option value="slack">slack</option>
+              <option value="standard">standard webhooks</option>
+            </select>
+          </label>
+
+          <label className="field">
+            <span>where the signing secret lives</span>
+            <input
+              value={secretRef}
+              onChange={(event) => setSecretRef(event.target.value)}
+              placeholder="env:MY_HOOK_SECRET"
+            />
+          </label>
+          <p className="muted endpoint-hint">
+            A reference, not the secret: <code>env:NAME</code> reads it from the
+            server's environment, <code>file:/path</code> from disk. The database
+            records where it lives rather than what it is.
+          </p>
+
+          {error !== null && <p className="endpoint-warn">{error}</p>}
+        </div>
+
+        <footer className="dialog-footer">
+          <div className="spacer" />
+          <button onClick={create} disabled={creating || secretRef.trim().length < 5}>
+            {creating ? 'Adding…' : 'Add endpoint'}
+          </button>
+          <button onClick={onClose}>Done</button>
+        </footer>
+      </div>
+    </div>
+  )
 }
 
 /**
@@ -299,6 +440,8 @@ function Editor() {
    * stop someone doing the work they can still do.
    */
   const [needsKey, setNeedsKey] = useState(false)
+  const [endpointList, setEndpointList] = useState<readonly EndpointSummary[]>([])
+  const [endpointsOpen, setEndpointsOpen] = useState(false)
 
   const { screenToFlowPosition } = useReactFlow()
 
@@ -375,6 +518,21 @@ function Editor() {
       cancelled = true
     }
   }, [])
+
+  const loadEndpoints = useCallback(() => {
+    apiFetch('api/endpoints')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: EndpointSummary[] | null) => {
+        if (Array.isArray(data)) setEndpointList(data)
+      })
+      .catch((error: unknown) => {
+        if (error instanceof UnauthorizedError) setNeedsKey(true)
+      })
+  }, [])
+
+  useEffect(() => {
+    loadEndpoints()
+  }, [loadEndpoints])
 
   useEffect(() => {
     let cancelled = false
@@ -886,6 +1044,16 @@ function Editor() {
           </>
         )}
 
+        {webhook !== null && (
+          <button
+            onClick={() => setEndpointsOpen(true)}
+            title="Where webhooks arrive"
+          >
+            Endpoints
+            {endpointList.length > 1 && <span className="count">{endpointList.length}</span>}
+          </button>
+        )}
+
         <button
           className="panel-toggle right"
           onClick={() => editorStore.getState().toggleRightPanel()}
@@ -903,6 +1071,14 @@ function Editor() {
           </span>
         )}
       </header>
+
+      {endpointsOpen && (
+        <EndpointsDialog
+          endpoints={endpointList}
+          onClose={() => setEndpointsOpen(false)}
+          onCreated={loadEndpoints}
+        />
+      )}
 
       {needsKey && (
         <div className="restored needs-key" role="alert">
