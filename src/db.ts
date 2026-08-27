@@ -31,8 +31,30 @@ export function dbConfigFromEnv(env: NodeJS.ProcessEnv = process.env): DbConfig 
   }
 }
 
+/**
+ * Why the error handler is not optional.
+ *
+ * `pg.Pool` emits `error` when a client that is sitting *idle* in the pool
+ * fails — the database restarted, a proxy dropped the connection, the network
+ * blinked. In Node an `error` event with no listener is rethrown, so a pool
+ * with no handler takes the whole process down. A database restart should cost
+ * a reconnect, not an outage, and the failure is bewildering when it happens:
+ * a stack trace from deep inside pg-protocol with no request to blame it on.
+ *
+ * The pool discards the broken client and opens a new one on the next
+ * acquisition, so logging is genuinely all that is required here. Errors on a
+ * client that is *checked out* still reject the query, as they should — this
+ * only covers the idle ones nobody is waiting on.
+ */
+function attachIdleErrorHandler(pool: Pool): Pool {
+  pool.on('error', (error) => {
+    console.error(`[pg] idle client error: ${error.message}`)
+  })
+  return pool
+}
+
 export function createPool(config: DbConfig = dbConfigFromEnv()): Pool {
-  return new Pool({ ...config, max: 10, connectionTimeoutMillis: 5_000 })
+  return attachIdleErrorHandler(new Pool({ ...config, max: 10, connectionTimeoutMillis: 5_000 }))
 }
 
 export class MigrationDriftError extends Error {
