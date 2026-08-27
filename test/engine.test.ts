@@ -69,7 +69,7 @@ describe('engine', { skip: SKIP }, () => {
     nodes,
   })
 
-  const start = async (flow: FlowDefinition, options: { runTimeoutMs?: number } = {}) =>
+  const start = async (flow: FlowDefinition, options: { runTimeoutMs?: number; input?: unknown } = {}) =>
     withTransaction(pool, async (tx) => {
       const { run } = await createRun(tx, { tenantId, flow, ...options })
       return run
@@ -228,6 +228,45 @@ describe('engine', { skip: SKIP }, () => {
       const finished = await getRun(pool, run.startedAt, run.id)
       assert.equal(finished?.status, 'succeeded')
       assert.deepEqual(ran, ['flaky', 'flaky', 'after'])
+    })
+
+    it('makes the run input visible to every step', async () => {
+      // createRun has always accepted an input and written it, but nothing
+      // selected the column, so the value was unreachable — a webhook body
+      // went in and the step that was meant to act on it could not see it.
+      const seen: unknown[] = []
+      const payload = { event: 'invoice.paid', amount: 4200 }
+      const flow = makeFlow([
+        { id: 'first', kind: 'noop', idempotent: true },
+        { id: 'second', kind: 'noop', idempotent: true },
+      ])
+      const handler = scriptedHandler({
+        failures: [],
+        onInvoke: (ctx) => seen.push(ctx.run.input),
+      })
+
+      const run = await start(flow, { input: payload })
+      await drainUntilQuiet(pool, deps(flow, { noop: handler }), { tenantId })
+
+      assert.equal(seen.length, 2)
+      assert.deepEqual(seen[0], payload)
+      assert.deepEqual(seen[1], payload, 'every step sees it, not just the first')
+    })
+
+    it('reports a null input for a run started without one', async () => {
+      let seen: unknown = 'unset'
+      const flow = makeFlow([{ id: 'only', kind: 'noop', idempotent: true }])
+      const handler = scriptedHandler({
+        failures: [],
+        onInvoke: (ctx) => {
+          seen = ctx.run.input
+        },
+      })
+
+      const run = await start(flow)
+      await drainUntilQuiet(pool, deps(flow, { noop: handler }), { tenantId })
+      void run
+      assert.equal(seen, null)
     })
 
     it('makes upstream outputs visible to later steps', async () => {

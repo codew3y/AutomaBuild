@@ -61,6 +61,11 @@ function runColumns(alias = ''): string {
     'steps_failed',
     'error_class',
     'error_code',
+    // The payload the run was started with. Written by createRun since the
+    // first version and never selected, which made `input` a parameter that
+    // accepted a value nothing could ever read — a webhook body went in and
+    // was unreachable from the step that was supposed to act on it.
+    'input_inline',
   ]
     .map((column) => `${prefix}${column}`)
     .join(', ')
@@ -86,6 +91,7 @@ function toRun(row: Record<string, unknown>): RunRow {
     stepsFailed: row.steps_failed as number,
     errorClass: (row.error_class as string | null) ?? null,
     errorCode: (row.error_code as string | null) ?? null,
+    input: row.input_inline ?? null,
   }
 }
 

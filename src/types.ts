@@ -75,6 +75,14 @@ export interface RunRow {
   readonly stepsFailed: number
   readonly errorClass: string | null
   readonly errorCode: string | null
+  /**
+   * What the run was started with — the webhook body, typically.
+   *
+   * On the run rather than on the first step, because it belongs to the run:
+   * a resume re-reads it, and putting it on a step would mean a resumed run
+   * whose first step was skipped could not see what triggered it.
+   */
+  readonly input: unknown
 }
 
 export interface StepRow {
