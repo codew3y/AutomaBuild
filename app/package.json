@@ -14,7 +14,8 @@
     "db:migrate": "node src/migrate.ts",
     "start": "node src/server.ts",
     "demo": "node src/demo.ts",
-    "test": "node --test \"test/*.test.ts\""
+    "test": "node --test \"test/*.test.ts\"",
+    "send": "node scripts/send-webhook.mjs"
   },
   "dependencies": {
     "automa-durable-runner": "github:codew3y/automa-durable-runner",

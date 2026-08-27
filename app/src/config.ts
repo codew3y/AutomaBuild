@@ -1,3 +1,5 @@
+import { resolveApiKey } from './auth.ts'
+
 /**
  * One place where the environment is read.
  *
@@ -8,6 +10,10 @@
 
 export interface AppConfig {
   readonly port: number
+  /** Bind address. Loopback is what makes an absent API key acceptable. */
+  readonly host: string
+  /** Null only when bound to loopback — see resolveApiKey. */
+  readonly apiKey: string | null
   readonly tenantId: string
   readonly endpointId: string
   readonly scheme: 'stripe' | 'github' | 'slack' | 'standard'
@@ -75,8 +81,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error(`WEBHOOK_SCHEME is ${scheme}, which is not a scheme this verifies.`)
   }
 
+  const host = env.HOST ?? '127.0.0.1'
+
   return {
     port: Number(env.PORT ?? 8080),
+    host,
+    // Throws rather than returning null when bound to anything but loopback.
+    // A warning would scroll past and the thing would be exposed anyway.
+    apiKey: resolveApiKey(env, host),
     // Fixed defaults rather than generated ones: a demo that invents a new
     // tenant each start would show an empty history every time, which looks
     // like the runs were lost.

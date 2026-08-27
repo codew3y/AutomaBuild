@@ -54,6 +54,7 @@ import {
 import { randomUUID } from 'node:crypto'
 
 import { loadConfig, type AppConfig } from './config.ts'
+import { registerApiAuth, resolveApiKey } from './auth.ts'
 import { compileFlow, type CanvasGraph } from './flow.ts'
 import { FlowStore } from './flow-store.ts'
 import { mappingHandlers } from './handlers.ts'
@@ -129,6 +130,10 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
   // cannot see it, and every webhook comes back 415 as if the sender were at
   // fault. The library's own comment says so; this is the caller honouring it.
   registerRawBody(app)
+
+  // Before any route is registered, so nothing can be added later that quietly
+  // sits outside the check.
+  registerApiAuth(app, { apiKey: config.apiKey })
 
   const store = new PostgresReplayStore(gatePool)
   const gate = createGate({ store })
@@ -253,6 +258,14 @@ function viewerGraph(graph: CanvasGraph): ViewerGraph {
   }
 }
 
+/** Which header each scheme signs with, so the editor can say so. */
+const SIGNATURE_HEADERS: Record<string, string> = {
+  stripe: 'Stripe-Signature',
+  github: 'X-Hub-Signature-256',
+  slack: 'X-Slack-Signature',
+  standard: 'webhook-signature',
+}
+
 function registerApi(
   app: FastifyInstance,
   pool: ReturnType<typeof createRunnerPool>,
@@ -260,6 +273,30 @@ function registerApi(
   config: AppConfig,
 ): void {
   app.get('/api/health', async () => ({ ok: true }))
+
+  /**
+   * Where to send a webhook, and how to sign it.
+   *
+   * The editor could not tell anyone this before, so a trigger node was a step
+   * with no address — you could build a flow and have no idea what to point at
+   * it. The secret is deliberately not here: this endpoint is unauthenticated,
+   * and the whole point of the secret is that possessing it proves who you are.
+   */
+  app.get('/api/webhook', async (request) => {
+    const forwardedHost = request.headers['x-forwarded-host']
+    const host = (Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost) ?? request.headers.host
+    const proto = request.headers['x-forwarded-proto'] ?? 'http'
+
+    return {
+      endpointId: config.endpointId,
+      scheme: config.scheme,
+      // Built from the request, so it is right behind a proxy and right when
+      // the editor is being served from the dev server on another port.
+      url: `${Array.isArray(proto) ? proto[0] : proto}://${host}/webhooks/${config.endpointId}`,
+      signatureHeader: SIGNATURE_HEADERS[config.scheme],
+      secretConfigured: config.secrets.length > 0,
+    }
+  })
 
   /**
    * What is live right now.
@@ -474,18 +511,56 @@ async function registerCanvas(app: FastifyInstance, config: AppConfig): Promise<
   })
 }
 
+/**
+ * Say something useful when startup fails.
+ *
+ * `pg` throws an AggregateError when it cannot connect, and an AggregateError
+ * has an empty `message` — so printing `error.message` printed a blank line and
+ * exited 1. A server that dies in silence is the worst possible failure mode:
+ * there is nothing to search for and nothing to act on.
+ */
+const NEWLINE = String.fromCharCode(10)
+
+export function describeStartupFailure(error: unknown): string {
+  if (error instanceof AggregateError) {
+    const causes = error.errors
+      .map((inner) => (inner as { message?: string }).message ?? String(inner))
+      .filter((message, index, all) => all.indexOf(message) === index)
+
+    return [
+      `Could not start: ${error.message === '' ? 'connection failed' : error.message}`,
+      ...causes.map((cause) => `  ${cause}`),
+      '',
+      'If those are database ports, the stack may not be up:',
+      '  npm run db:up',
+      'On Windows, WSL sometimes drops its port forwarding after an idle shutdown,',
+      'and the containers look healthy from inside WSL while being unreachable from',
+      'Windows. "docker compose restart" re-publishes them.',
+    ].join(NEWLINE)
+  }
+
+  if (error instanceof Error) {
+    return error.stack ?? error.message
+  }
+  return String(error)
+}
+
 if (process.argv[1]?.endsWith('server.ts')) {
   const config = loadConfig()
   buildServer({ config })
     .then(async (server) => {
-      await server.app.listen({ port: config.port, host: '0.0.0.0' })
+      // Loopback by default. It bound 0.0.0.0 before, which put an
+      // unauthenticated publish endpoint on every interface — reachable from
+      // anything on the same network. Widening it now requires HOST, and
+      // setting HOST to anything but loopback requires API_KEY.
+      await server.app.listen({ port: config.port, host: config.host })
       console.log(`\n  AutomaBuild is running.`)
       console.log(`    UI       http://localhost:${config.port}/`)
       console.log(`    webhook  POST http://localhost:${config.port}/webhooks/${config.endpointId}`)
       console.log(`    runs     http://localhost:${config.port}/api/runs\n`)
     })
     .catch((error: unknown) => {
-      console.error(error instanceof Error ? error.message : error)
+      console.error(describeStartupFailure(error))
       process.exit(1)
     })
 }
