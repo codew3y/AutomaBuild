@@ -1,7 +1,6 @@
 {
   "name": "automa-webhook-gate",
   "version": "0.0.0",
-  "private": true,
   "description": "Verify inbound webhooks properly: raw body, constant-time comparison, timestamp window, replay protection.",
   "license": "MIT",
   "author": "Wey Tongol",
@@ -21,7 +20,8 @@
     "db:down": "docker compose down",
     "db:reset": "docker compose down -v && docker compose up -d",
     "db:migrate": "node scripts/migrate.ts",
-    "demo": "node src/demo.ts"
+    "demo": "node src/demo.ts",
+    "build": "tsc -p tsconfig.build.json"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
@@ -46,5 +46,18 @@
   "homepage": "https://github.com/codew3y/automa-webhook-gate#readme",
   "bugs": {
     "url": "https://github.com/codew3y/automa-webhook-gate/issues"
-  }
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "migrations",
+    "README.md",
+    "LICENSE"
+  ]
 }
