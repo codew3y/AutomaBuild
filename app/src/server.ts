@@ -51,8 +51,11 @@ import {
   type FlowDefinition,
 } from 'automa-durable-runner'
 
+import { randomUUID } from 'node:crypto'
+
 import { loadConfig, type AppConfig } from './config.ts'
 import { compileFlow, type CanvasGraph } from './flow.ts'
+import { FlowStore } from './flow-store.ts'
 import { mappingHandlers } from './handlers.ts'
 import { toViewerListing, toViewerRun, type ViewerGraph } from './runs.ts'
 import { DEMO_FLOW } from './demo-flow.ts'
@@ -82,7 +85,7 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
   const config = options.config ?? loadConfig()
   const graph = options.graph ?? DEMO_FLOW
 
-  // Compiling at startup, not per request. A flow that cannot run is a
+  // Compiled before anything is served. A flow that cannot run is a
   // deployment that should not come up — discovering it when the first webhook
   // arrives means the delivery is already recorded as seen.
   const compiled = compileFlow(graph, { flowId: DEMO_FLOW_ID, versionId: DEMO_FLOW_VERSION_ID })
@@ -97,6 +100,27 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
 
   const gatePool = createGatePool(config.gateDb)
   const runnerPool = createRunnerPool(config.runnerDb)
+
+  const flows = new FlowStore({
+    pool: runnerPool,
+    tenantId: config.tenantId,
+    flowId: DEMO_FLOW_ID,
+  })
+
+  // Seed the first version if nothing has ever been published, so a fresh
+  // database has something to run rather than rejecting the first webhook.
+  let current = await flows.current()
+  if (current === null) {
+    const seeded = await flows.publish(graph, {
+      versionId: DEMO_FLOW_VERSION_ID,
+      publishedBy: 'startup',
+    })
+    if (!seeded.ok) throw new Error('the built-in flow does not compile')
+    current = seeded.published
+    console.log(`seeded flow version ${current.versionId}`)
+  } else {
+    console.log(`current flow version ${current.versionId}`)
+  }
 
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 })
 
@@ -128,10 +152,18 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
     onAccepted: async (_endpoint, request, result) => {
       const body = parseBody(request.rawBody)
 
+      // Read per delivery, not captured once. A publish between two webhooks
+      // must affect the second one, and a run created from a stale definition
+      // would then be executed against a version it was not built from.
+      const live = await flows.current()
+      if (live === null) throw new Error('no flow is published')
+      const definition = await flows.resolver()(live.versionId)
+      if (definition === null) throw new Error(`flow version ${live.versionId} will not compile`)
+
       await withTransaction(runnerPool, async (tx) => {
         const { run, deduplicated } = await createRun(tx, {
           tenantId: config.tenantId,
-          flow: compiled.flow,
+          flow: definition,
           input: body,
           // The gate's dedup key, reused as the engine's. Two layers keyed on
           // the same thing is not redundant, but not for the reason first
@@ -152,7 +184,7 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
     },
   })
 
-  registerApi(app, runnerPool, graph, config)
+  registerApi(app, runnerPool, flows, config)
   await registerCanvas(app, config)
 
   const worker =
@@ -161,7 +193,10 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
       : startWorker(
           runnerPool,
           {
-            flow: compiled.flow,
+            // A resolver, not a definition. This is what makes publishing
+            // non-blocking: a run already in flight keeps resolving the version
+            // it started on while new runs get the new one.
+            flows: flows.resolver(),
             handlers: mappingHandlers(),
             workerId: `web-${process.pid}`,
           },
@@ -221,12 +256,67 @@ function viewerGraph(graph: CanvasGraph): ViewerGraph {
 function registerApi(
   app: FastifyInstance,
   pool: ReturnType<typeof createRunnerPool>,
-  graph: CanvasGraph,
+  flows: FlowStore,
   config: AppConfig,
 ): void {
-  const asViewerGraph = viewerGraph(graph)
-
   app.get('/api/health', async () => ({ ok: true }))
+
+  /**
+   * What is live right now.
+   *
+   * The editor needs this to tell whether its draft has diverged from what is
+   * running — which is the whole basis of the Publish / Discard pair. Without
+   * it the editor can only ever say "unsaved", never "unpublished".
+   */
+  app.get('/api/flows/published', async (_request, reply) => {
+    const current = await flows.current()
+    if (current === null) return reply.code(404).send({ error: 'nothing published yet' })
+    return {
+      versionId: current.versionId,
+      flowId: current.flowId,
+      publishedAt: current.publishedAt.toISOString(),
+      publishedBy: current.publishedBy,
+      graph: current.graph,
+    }
+  })
+
+  /**
+   * Publish a new version.
+   *
+   * Always an insert, never an update. A run records the version it started on
+   * and the worker resolves by that id, so overwriting would rewrite history
+   * under a run still using it.
+   *
+   * A graph that does not compile is a 422 carrying every problem, not the
+   * first one: whoever pressed the button is looking at the editor and wants
+   * the list.
+   */
+  app.post('/api/flows/published', async (request, reply) => {
+    const body = request.body as { graph?: CanvasGraph; publishedBy?: string } | undefined
+    const graph = body?.graph
+
+    if (graph === undefined || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
+      return reply.code(400).send({ error: 'a graph with nodes and edges is required' })
+    }
+
+    const result = await flows.publish(graph, {
+      versionId: randomUUID(),
+      ...(body?.publishedBy === undefined ? {} : { publishedBy: body.publishedBy }),
+    })
+
+    if (!result.ok) {
+      return reply.code(422).send({
+        error: 'the flow does not compile',
+        problems: result.problems,
+      })
+    }
+
+    console.log(`published flow version ${result.published.versionId}`)
+    return reply.code(201).send({
+      versionId: result.published.versionId,
+      publishedAt: result.published.publishedAt.toISOString(),
+    })
+  })
 
   /**
    * The run list.
@@ -289,7 +379,7 @@ function registerApi(
       // null run would make the viewer render an empty canvas instead.
       return reply.code(404).send({ error: 'no runs yet' })
     }
-    return sendRun(reply, pool, rows[0].started_at, rows[0].id, asViewerGraph)
+    return sendRun(reply, pool, flows, rows[0].started_at, rows[0].id)
   })
 
   app.get('/api/runs/:id', async (request, reply) => {
@@ -301,7 +391,7 @@ function registerApi(
       [id, config.tenantId],
     )
     if (rows.length === 0) return reply.code(404).send({ error: 'no such run' })
-    return sendRun(reply, pool, rows[0].started_at, id, asViewerGraph)
+    return sendRun(reply, pool, flows, rows[0].started_at, id)
   })
 }
 
@@ -312,13 +402,21 @@ interface Replier {
 async function sendRun(
   reply: Replier,
   pool: ReturnType<typeof createRunnerPool>,
+  flows: FlowStore,
   startedAt: Date,
   id: string,
-  graph: ViewerGraph,
 ): Promise<unknown> {
   const run = await withTransaction(pool, (tx) => getRun(tx, startedAt, id))
   if (run === null) return reply.code(404).send({ error: 'no such run' })
   const steps = await withTransaction(pool, (tx) => listSteps(tx, run))
+
+  // The graph the run actually ran on, not whatever is live now. Drawing
+  // yesterday's failure on today's diagram is the thing the run viewer exists
+  // to avoid — the step being looked for may not be in the current version.
+  const version = await flows.byVersion(run.flowVersionId)
+  const graph: ViewerGraph =
+    version === null ? { nodes: [], edges: [] } : viewerGraph(version.graph)
+
   return toViewerRun(run, steps, graph)
 }
 

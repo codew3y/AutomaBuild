@@ -16,6 +16,8 @@ import { migrate as migrateRunner } from 'automa-durable-runner'
 
 import { loadConfig } from './config.ts'
 
+const here = dirname(fileURLToPath(import.meta.url))
+
 /** The migrations ship inside each package, so they are resolved from there
  *  rather than copied — a copy is a second history to keep in step. */
 function migrationsOf(pkg: string): string {
@@ -44,6 +46,16 @@ export async function runMigrations(log: (message: string) => void = console.log
       log: (m) => log(`  ${m}`),
     })
     log(`  applied ${runner.applied.length}, already present ${runner.skipped.length}`)
+
+    // This application owns one table of its own — published flow versions —
+    // and runs it alongside the engine's, in the engine's database. It is
+    // deliberately not part of either library's history: neither of them has
+    // an opinion about where a flow definition comes from.
+    log('app:')
+    const app = await migrateRunner(runnerClient, join(here, '..', 'migrations'), {
+      log: (m) => log(`  ${m}`),
+    })
+    log(`  applied ${app.applied.length}, already present ${app.skipped.length}`)
   } finally {
     await Promise.all([gatePool.end(), runnerClient.end()])
   }

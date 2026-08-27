@@ -17,14 +17,16 @@
     "test": "node --test \"test/*.test.ts\""
   },
   "dependencies": {
+    "automa-durable-runner": "github:codew3y/automa-durable-runner",
     "automa-safe-fetch": "^0.1.1",
     "automa-webhook-gate": "github:codew3y/automa-webhook-gate",
-    "automa-durable-runner": "github:codew3y/automa-durable-runner",
     "fastify": "^5.12.1",
+    "nodemailer": "^9.0.5",
     "pg": "^8.16.3"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
+    "@types/nodemailer": "^8.0.1",
     "@types/pg": "^8.15.5",
     "typescript": "^5.9.2"
   }

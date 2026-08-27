@@ -13,7 +13,10 @@
  * classification are unchanged. Resolution is the only thing added.
  */
 
-import { defaultHandlers, type HandlerRegistry, type StepContext, type StepHandler, type StepResult } from 'automa-durable-runner'
+import { StepFailure, defaultHandlers, type HandlerRegistry, type StepContext, type StepHandler, type StepResult } from 'automa-durable-runner'
+
+import { transformHandler } from './steps/transform.ts'
+import { emailHandler, smtpFromEnv, type SmtpConfig } from './steps/email.ts'
 
 /** `{{ steps.fetch.output.email }}` — whitespace-tolerant, nothing else. */
 const REFERENCE = /\{\{\s*([^}]+?)\s*\}\}/g
@@ -73,10 +76,33 @@ export function resolveTemplate(template: string, scope: unknown): ResolveResult
   return { value, missing }
 }
 
+const SOLE_REFERENCE = /^\s*\{\{\s*([^}]+?)\s*\}\}\s*$/
+
 /** True when the whole string is a single reference, so its type survives. */
 function isSoleReference(template: string): boolean {
-  const match = /^\s*\{\{\s*([^}]+?)\s*\}\}\s*$/.exec(template)
-  return match !== null
+  return SOLE_REFERENCE.test(template)
+}
+
+/**
+ * Resolve one string, keeping its type when it is a single whole reference.
+ *
+ * `{{ steps.x.output.count }}` on its own gives back the number; the same
+ * reference inside a longer string gives back text, because concatenation can
+ * mean nothing else. Shared with the transform step, which resolves its values
+ * itself after parsing so the same rule applies inside a JSON template.
+ */
+export function resolveValue(value: string, scope: unknown): { value: unknown; missing: string[] } {
+  if (!value.includes('{{')) return { value, missing: [] }
+
+  if (isSoleReference(value)) {
+    const path = SOLE_REFERENCE.exec(value)![1]!
+    const resolved = readPath(scope, path)
+    if (resolved === undefined || resolved === null) return { value, missing: [path] }
+    return { value: resolved, missing: [] }
+  }
+
+  const result = resolveTemplate(value, scope)
+  return { value: result.value, missing: [...result.missing] }
 }
 
 export interface ResolvedConfig {
@@ -95,19 +121,9 @@ export function resolveConfig(config: Record<string, unknown>, scope: unknown): 
 
   const walk = (value: unknown): unknown => {
     if (typeof value === 'string') {
-      if (!value.includes('{{')) return value
-      if (isSoleReference(value)) {
-        const path = /^\s*\{\{\s*([^}]+?)\s*\}\}\s*$/.exec(value)![1]!
-        const resolved = readPath(scope, path)
-        if (resolved === undefined || resolved === null) {
-          missing.push(path)
-          return value
-        }
-        return resolved
-      }
-      const result = resolveTemplate(value, scope)
-      missing.push(...result.missing)
-      return result.value
+      const resolved = resolveValue(value, scope)
+      missing.push(...resolved.missing)
+      return resolved.value
     }
     if (Array.isArray(value)) return value.map(walk)
     if (value !== null && typeof value === 'object') {
@@ -151,10 +167,36 @@ export function scopeFor(context: StepContext): Record<string, unknown> {
  * wrong path exhausts its attempts and lands in the DLQ with the path in the
  * message, which is what someone debugging needs to see.
  */
-export function withMapping(handler: StepHandler): StepHandler {
+export interface MappingOptions {
+  /**
+   * Config fields to leave unresolved, for a handler that must resolve them
+   * itself.
+   *
+   * The transform step is the reason this exists. Its template is a JSON
+   * document with references inside it; resolving here would substitute each
+   * one into the *text* of that document, so `{"n": "{{ x }}"}` would parse to
+   * the string \"4200\" rather than the number 4200. The transform parses
+   * first and resolves each value afterwards, which is the only order that can
+   * preserve a type.
+   */
+  readonly rawFields?: readonly string[]
+}
+
+export function withMapping(handler: StepHandler, options: MappingOptions = {}): StepHandler {
+  const rawFields = options.rawFields ?? []
+
   return async (context: StepContext): Promise<StepResult> => {
-    const raw = context.node.config ?? {}
-    const { config, missing } = resolveConfig(raw, scopeFor(context))
+    const original = context.node.config ?? {}
+
+    const held: Record<string, unknown> = {}
+    const raw: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(original)) {
+      if (rawFields.includes(key)) held[key] = value
+      else raw[key] = value
+    }
+
+    const { config: resolvedFields, missing } = resolveConfig(raw, scopeFor(context))
+    const config = { ...resolvedFields, ...held }
 
     if (missing.length > 0) {
       throw new Error(`unresolved reference${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`)
@@ -177,8 +219,58 @@ export function withMapping(handler: StepHandler): StepHandler {
  */
 export const triggerHandler: StepHandler = async (context) => ({ output: context.run.input })
 
-/** The engine's handlers, each able to resolve the editor's references. */
-export function mappingHandlers(): HandlerRegistry {
-  const base: Record<string, StepHandler> = { ...defaultHandlers(), trigger: triggerHandler }
-  return Object.fromEntries(Object.entries(base).map(([kind, handler]) => [kind, withMapping(handler)]))
+/**
+ * A step kind that is configured but unavailable.
+ *
+ * Registering nothing would make the engine report "no handler registered",
+ * which reads like a missing feature. This says which piece of configuration
+ * is absent, which is what someone can actually act on. It is deterministic,
+ * so it fails once rather than retrying four more times to reach the same
+ * conclusion.
+ */
+function unconfigured(kind: string, reason: string): StepHandler {
+  return async () => {
+    throw new StepFailure(`the ${kind} step is not configured: ${reason}`, {
+      deterministicallyBroken: true,
+    })
+  }
+}
+
+export interface HandlerOptions {
+  /** Omit to read SMTP settings from the environment. */
+  readonly smtp?: SmtpConfig | null
+}
+
+/**
+ * The engine's handlers plus this application's, each able to resolve the
+ * editor's references.
+ *
+ * The step catalogue lives here rather than in the engine on purpose: the
+ * engine ships `http` and `noop` and has no opinion about what a workflow
+ * product offers. What a trigger, a transform and an email mean is this
+ * application's business.
+ */
+export function mappingHandlers(options: HandlerOptions = {}): HandlerRegistry {
+  const smtp = options.smtp === undefined ? smtpFromEnv() : options.smtp
+
+  const base: Record<string, StepHandler> = {
+    ...defaultHandlers(),
+    trigger: triggerHandler,
+    transform: transformHandler(),
+    email:
+      smtp === null
+        ? unconfigured('email', 'SMTP_HOST is not set')
+        : emailHandler({ config: smtp }),
+  }
+
+  // The transform resolves its own template, for the type-preservation reason
+  // on MappingOptions.
+  const rawFor: Record<string, readonly string[]> = { transform: ['template', 'expression'] }
+
+  return Object.fromEntries(
+    Object.entries(base).map(([kind, handler]) => [
+      kind,
+      withMapping(handler, { rawFields: rawFor[kind] ?? [] }),
+    ]),
+  )
 }

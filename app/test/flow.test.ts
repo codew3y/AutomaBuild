@@ -93,15 +93,67 @@ describe('compiling a canvas graph into a flow definition', () => {
     assert.equal(result.flow.nodes[1]?.config?.['canvasKind'], 'email')
   })
 
-  test('a step with no executor is recorded but warns rather than silently doing nothing', () => {
+  test('every step kind maps to an executor that exists', () => {
     const result = compile(
-      graph([['t', 'trigger'], ['e', 'email', { to: 'a@b.c', body: 'x' }]], [['t', 'e']]),
+      graph(
+        [
+          ['t', 'trigger'],
+          ['h', 'http', { url: 'https://example.com' }],
+          ['x', 'transform', { template: '{"ok":true}' }],
+          ['e', 'email', { to: 'a@b.c', body: 'hello' }],
+        ],
+        [
+          ['t', 'h'],
+          ['h', 'x'],
+          ['x', 'e'],
+        ],
+      ),
     )
     assert.equal(result.ok, true)
     if (!result.ok) return
-    assert.equal(result.warnings.length, 1)
-    assert.equal(result.warnings[0]?.nodeId, 'e')
-    assert.match(result.warnings[0]!.message, /does nothing yet/)
+    assert.deepEqual(
+      result.flow.nodes.map((n) => n.kind),
+      ['trigger', 'http', 'transform', 'email'],
+      'transform and email used to compile to noop; they have real executors now',
+    )
+    assert.deepEqual(result.warnings, [], 'nothing is a placeholder any more')
+  })
+
+  test('an email step with no body will not compile', () => {
+    // Refused here as well as at send time: an email with no body reaches a
+    // person and says nothing, which is worse than a flow that will not
+    // publish.
+    const result = compile(
+      graph([['t', 'trigger'], ['e', 'email', { to: 'a@b.c' }]], [['t', 'e']]),
+    )
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.ok(result.problems.some((p) => /needs a body/.test(p.message)))
+  })
+
+  test('an email step with no recipient will not compile', () => {
+    const result = compile(
+      graph([['t', 'trigger'], ['e', 'email', { body: 'hi' }]], [['t', 'e']]),
+    )
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.ok(result.problems.some((p) => /needs a recipient/.test(p.message)))
+  })
+
+  test('a transform step with no template will not compile', () => {
+    const result = compile(
+      graph([['t', 'trigger'], ['x', 'transform', {}]], [['t', 'x']]),
+    )
+    assert.equal(result.ok, false)
+    if (result.ok) return
+    assert.ok(result.problems.some((p) => /needs a template/.test(p.message)))
+  })
+
+  test('a transform still accepts the old field name', () => {
+    const result = compile(
+      graph([['t', 'trigger'], ['x', 'transform', { expression: '{"a":1}' }]], [['t', 'x']]),
+    )
+    assert.equal(result.ok, true)
   })
 
   describe('what it refuses to compile', () => {

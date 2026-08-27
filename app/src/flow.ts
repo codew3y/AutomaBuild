@@ -73,12 +73,8 @@ const KIND_TO_EXECUTOR: Record<string, string> = {
   // than on the first thing that acted on it.
   trigger: 'trigger',
   http: 'http',
-  // No transform or email executor exists yet. They compile to noop so the
-  // shape of the run is right and the step is visibly present — and they warn,
-  // because a step that silently does nothing is worse than one that is
-  // missing.
-  transform: 'noop',
-  email: 'noop',
+  transform: 'transform',
+  email: 'email',
 }
 
 /**
@@ -205,11 +201,22 @@ export function compileFlow(graph: CanvasGraph, options: CompileOptions): Compil
       problems.push({ nodeId: node.id, message: `There is no executor for a ${node.kind} step.` })
       continue
     }
-    if (executor === 'noop' && node.kind !== 'trigger') {
-      warnings.push({
-        nodeId: node.id,
-        message: `A ${node.kind} step is recorded but does nothing yet — there is no executor for it.`,
-      })
+    if (node.kind === 'email') {
+      if (String(node.data?.['to'] ?? '') === '') {
+        problems.push({ nodeId: node.id, message: 'An email step needs a recipient.' })
+      }
+      if (String(node.data?.['body'] ?? '').trim() === '') {
+        // Refused at compile time as well as at send time. An email with no
+        // body reaches a person and says nothing, which is worse than a flow
+        // that would not publish.
+        problems.push({ nodeId: node.id, message: 'An email step needs a body.' })
+      }
+    }
+    if (node.kind === 'transform') {
+      const template = node.data?.['template'] ?? node.data?.['expression']
+      if (String(template ?? '').trim() === '') {
+        problems.push({ nodeId: node.id, message: 'A transform step needs a template.' })
+      }
     }
     if (node.kind === 'http' && String(node.data?.['url'] ?? '') === '') {
       problems.push({ nodeId: node.id, message: 'An HTTP step needs a URL.' })

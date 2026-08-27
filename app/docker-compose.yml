@@ -63,6 +63,25 @@ services:
       retries: 30
     restart: unless-stopped
 
+  # A local SMTP server that accepts everything and delivers nothing.
+  #
+  # The email step sends over real SMTP, so the only way to exercise it without
+  # a mail account is to point it at something that speaks SMTP. Mailpit does,
+  # and holds the messages in a web UI at http://localhost:8025 so you can read
+  # what the flow actually produced — headers, body, resolved references.
+  #
+  # Nothing here ever reaches a real inbox. Set SMTP_HOST to a real relay when
+  # you want that, and set SMTP_ALLOWED_RECIPIENTS at the same time.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - '1025:1025'   # SMTP
+      - '8025:8025'   # the web UI
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: '1'
+      MP_SMTP_AUTH_ALLOW_INSECURE: '1'
+    restart: unless-stopped
+
 volumes:
   runner-data:
   gate-data:
