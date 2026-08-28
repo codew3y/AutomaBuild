@@ -66,7 +66,10 @@ export const createEditorStore = () =>
     selectedNodeId: null,
     focusedField: null,
     leftPanelOpen: true,
-    rightPanelOpen: true,
+    // Closed by default: mapping moved into the setup dialog, so nothing in
+    // this panel is needed to build a flow. What remains is validation and the
+    // run viewer, both worth reaching deliberately.
+    rightPanelOpen: false,
     viewport: { x: 0, y: 0, zoom: 1 },
     panelTab: 'setup',
     paletteOpen: true,

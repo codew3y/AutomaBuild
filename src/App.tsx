@@ -1036,21 +1036,28 @@ function Editor() {
           <Controls showInteractive={false} />
         </ReactFlow>
 
-        <aside className="panel" hidden={!rightPanelOpen}>
-          {viewing ? (
-            <RunPanel selectedId={selectedNodeId} run={run} live={live} />
-          ) : (
-            <EditPanel
-              selected={selected}
-              issues={issues}
-              outputs={mappingOutputs}
-              live={live}
-              editable={setupOpen}
-              onDelete={deleteSelected}
-              onOpenSetup={() => setSetupOpen(true)}
-            />
-          )}
-        </aside>
+        {/*
+          Hidden unless asked for.
+
+          Mapping lives in the setup dialog now, beside the fields it fills in,
+          so there is nothing here a single click needs. What is left is
+          validation and the run viewer — both worth reaching deliberately, and
+          neither worth a permanent column of canvas.
+        */}
+        {rightPanelOpen && (
+          <aside className="panel">
+            {viewing ? (
+              <RunPanel selectedId={selectedNodeId} run={run} live={live} />
+            ) : (
+              <EditPanel
+                selected={selected}
+                issues={issues}
+                onDelete={deleteSelected}
+                onOpenSetup={() => setSetupOpen(true)}
+              />
+            )}
+          </aside>
+        )}
       </div>
 
       {setupOpen && selected !== null && !viewing && (
@@ -1058,9 +1065,13 @@ function Editor() {
           nodeId={selected.id}
           kind={selected.kind}
           data={selected.data}
-          onClose={() => setSetupOpen(false)}
+          onClose={() => {
+            setSetupOpen(false)
+            editorStore.getState().clearFocusedField()
+          }}
           webhook={webhook}
-          panelOpen={rightPanelOpen}
+          outputs={mappingOutputs}
+          live={live}
           onDelete={() => {
             setSetupOpen(false)
             deleteSelected()
@@ -1090,7 +1101,8 @@ function SetupDialog({
   onClose,
   onDelete,
   webhook,
-  panelOpen,
+  outputs,
+  live,
 }: {
   nodeId: string
   kind: string
@@ -1098,8 +1110,9 @@ function SetupDialog({
   onClose: () => void
   onDelete: () => void
   webhook: WebhookInfo | null
-  /** Whether the right panel is showing, so the backdrop can leave it clear. */
-  panelOpen: boolean
+  /** What earlier steps produced, for the mapping side. */
+  outputs: Record<string, unknown>
+  live: boolean
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1111,7 +1124,7 @@ function SetupDialog({
 
   return (
     <div
-      className={panelOpen ? "dialog-backdrop beside-panel" : "dialog-backdrop"}
+      className="dialog-backdrop"
       onMouseDown={(event) => {
         // Only a click that both starts and ends on the backdrop dismisses.
         // Otherwise dragging to select text inside the dialog and releasing
@@ -1119,7 +1132,7 @@ function SetupDialog({
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="dialog" role="dialog" aria-label={`Configure ${nodeId}`}>
+      <div className="dialog dialog-wide" role="dialog" aria-modal="true" aria-label={`Configure ${nodeId}`}>
         <header className="dialog-header">
           <div>
             <strong>{String(data.label ?? nodeId)}</strong>
@@ -1133,11 +1146,30 @@ function SetupDialog({
           </button>
         </header>
 
-        <div className="dialog-body">
-          {/* A trigger is the one step whose most useful fact is not a field:
-              it is the address to send to. */}
-          {kind === "trigger" && <TriggerEndpoint webhook={webhook} />}
-          <StepForm key={nodeId} nodeId={nodeId} kind={kind} data={data} />
+        {/*
+          One container, two panes: the fields on the left and what can go in
+          them on the right. They were a dialog and a side panel before, which
+          meant the thing you were filling in and the thing you were filling it
+          from were separated by a backdrop.
+        */}
+        <div className="dialog-body split">
+          <div className="split-left">
+            {/* A trigger is the one step whose most useful fact is not a field:
+                it is the address to send to. */}
+            {kind === "trigger" && <TriggerEndpoint webhook={webhook} />}
+            <StepForm key={nodeId} nodeId={nodeId} kind={kind} data={data} />
+          </div>
+
+          <div className="split-right">
+            <MappingPanel
+              nodeId={nodeId}
+              kind={kind}
+              data={data}
+              outputs={outputs}
+              live={live}
+              editable
+            />
+          </div>
         </div>
 
         <footer className="dialog-footer">
@@ -1157,25 +1189,11 @@ function SetupDialog({
 function EditPanel({
   selected,
   issues,
-  outputs,
-  live,
-  editable,
   onDelete,
   onOpenSetup,
 }: {
   selected: { id: string; kind: string; data: Record<string, unknown> } | null
   issues: readonly ValidationIssue[]
-  outputs: Record<string, unknown>
-  live: boolean
-  /**
-   * Whether the panel may change the step.
-   *
-   * True only while the setup dialog is open. Selecting a step is for looking
-   * at it — clicking a field in the mapping tree used to write into the step
-   * with no dialog in sight, which made a single click an edit and gave no
-   * hint that it had been one.
-   */
-  editable: boolean
   onDelete: () => void
   onOpenSetup: () => void
 }) {
@@ -1185,9 +1203,9 @@ function EditPanel({
   return (
     <>
       <section className="panel-section">
-        <h2>Mapping</h2>
+        <h2>Step</h2>
         {selected === null ? (
-          <p className="muted">Select a step to map data into it.</p>
+          <p className="muted">Select a step to see it here.</p>
         ) : (
           <>
             <div className="selected-step">
@@ -1198,14 +1216,6 @@ function EditPanel({
                 Setup…
               </button>
             </div>
-            <MappingPanel
-              nodeId={selected.id}
-              kind={selected.kind}
-              data={selected.data}
-              outputs={outputs}
-              live={live}
-              editable={editable}
-            />
             <button className="danger" onClick={onDelete}>
               Delete this step
             </button>
