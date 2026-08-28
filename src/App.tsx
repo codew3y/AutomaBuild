@@ -341,7 +341,6 @@ function Editor() {
   // it writing this flow's draft under the id of whichever flow was open when
   // the editor started.
   const flowRef = useRef<string | null>(null)
-  flowRef.current = flowId
 
   const autosave = useRef(
     createAutosave({
@@ -520,6 +519,34 @@ function Editor() {
     // flow's must not be left on screen pretending to be this one's.
     setPublished(null)
 
+    // Hand the autosave over to this flow before anything else.
+    //
+    // A save scheduled while the previous flow was open is still armed, and its
+    // closure writes to whichever flow the ref points at — so without
+    // cancelling, the outgoing flow's graph lands under the incoming flow's
+    // key. Which then looks exactly like the switch not happening: the draft
+    // check below finds that write and keeps the old canvas.
+    autosave.cancel()
+    flowRef.current = flowId
+
+    // This flow's own draft, if it has one. Restoring here rather than in a
+    // separate mount-only effect is the other half of the bug: switching flows
+    // never re-read the draft, so the canvas kept whatever was already on it.
+    const saved = localStorage.getItem(draftKeyFor(flowId))
+    if (saved !== null) {
+      try {
+        const parsed = JSON.parse(saved) as FlowGraph
+        graphStore.getState().replaceGraph(parsed)
+        graphStore.temporal.getState().clear()
+        autosave.reset(parsed)
+        setRestored(true)
+      } catch {
+        localStorage.removeItem(draftKeyFor(flowId))
+      }
+    } else {
+      setRestored(false)
+    }
+
     apiFetch(`api/flows/published${scope}`)
       .then((response) => (response.ok ? response.json() : null))
       .then((data: { versionId: string; graph: FlowGraph } | null) => {
@@ -694,23 +721,6 @@ function Editor() {
   const runSummary = useMemo(() => summarise(run), [run])
   const viewing = mode === 'run'
 
-
-  useEffect(() => {
-    const saved = localStorage.getItem(draftKeyFor(flowRef.current))
-    if (saved !== null) {
-      try {
-        const parsed = JSON.parse(saved) as FlowGraph
-        graphStore.getState().replaceGraph(parsed)
-        autosave.reset(parsed)
-        graphStore.temporal.getState().clear()
-        setRestored(true)
-      } catch {
-        localStorage.removeItem(draftKeyFor(flowRef.current))
-      }
-    } else {
-      autosave.reset(graphStore.getState().snapshot())
-    }
-  }, [autosave])
 
   useEffect(() => {
     if (!viewing) autosave.schedule(graph)
@@ -977,6 +987,62 @@ function Editor() {
             ))}
             <option value="__new__">+ New flow…</option>
           </select>
+        )}
+
+        {/*
+          Archiving is a separate button rather than another entry in the
+          picker. A destructive action hidden among a list of places to go is
+          one somebody eventually chooses by accident, and this one takes a
+          webhook address out of service.
+        */}
+        {flowId !== null && !flowList.find((flow) => flow.flowId === flowId)?.isDefault && (
+          <button
+            className="flow-archive"
+            title="Archive this flow"
+            aria-label="Archive this flow"
+            onClick={() => {
+              const current = flowList.find((flow) => flow.flowId === flowId)
+              if (current === undefined) return
+              // Says what actually happens. The rows are kept, but with the
+              // flow out of the list and its endpoint disabled there is no
+              // longer a way to reach them from here — and "past runs are
+              // kept" on its own would read as a promise that they stay
+              // visible.
+              const ok = window.confirm(
+                `Archive "${current.name}"?
+
+` +
+                  'Its webhook address stops accepting deliveries, and the flow ' +
+                  'and its run history disappear from the editor.
+
+' +
+                  'Nothing is deleted — the runs stay in the database — but ' +
+                  'there is no way back to them from here.',
+              )
+              if (!ok) return
+
+              apiFetch(`api/flows/${encodeURIComponent(flowId)}`, { method: 'DELETE' })
+                .then(async (response) => {
+                  const data = (await response.json()) as { error?: string }
+                  if (!response.ok) throw new Error(data.error ?? 'could not archive the flow')
+                  // Drop this flow's draft too: the flow is gone from the list,
+                  // and leaving the draft behind would restore it if the id
+                  // ever came back.
+                  try {
+                    localStorage.removeItem(draftKeyFor(flowId))
+                  } catch {
+                    // Nothing to do; the draft simply outlives the flow.
+                  }
+                  setFlowId(null)
+                  loadFlows()
+                })
+                .catch((error: unknown) => {
+                  setPublishError(error instanceof Error ? error.message : String(error))
+                })
+            }}
+          >
+            ✕
+          </button>
         )}
 
         <div className="modes">
@@ -1303,6 +1369,8 @@ function SetupDialog({
   live: boolean
   connected: boolean
 }) {
+  const isTrigger = kind === 'trigger'
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -1341,25 +1409,33 @@ function SetupDialog({
           meant the thing you were filling in and the thing you were filling it
           from were separated by a backdrop.
         */}
-        <div className="dialog-body split">
-          <div className="split-left">
+        {/*
+          A trigger has no upstream steps, so its mapping side is always empty.
+          Splitting the dialog for it would give half the width to a permanent
+          "nothing runs before this step" and take that width from the one
+          thing a trigger has worth reading: its address.
+        */}
+        <div className={isTrigger ? 'dialog-body' : 'dialog-body split'}>
+          <div className={isTrigger ? undefined : 'split-left'}>
             {/* A trigger is the one step whose most useful fact is not a field:
                 it is the address to send to. */}
-            {kind === "trigger" && <TriggerEndpoint webhook={webhook} />}
+            {isTrigger && <TriggerEndpoint webhook={webhook} />}
             <StepForm key={nodeId} nodeId={nodeId} kind={kind} data={data} />
           </div>
 
-          <div className="split-right">
-            <MappingPanel
-              nodeId={nodeId}
-              kind={kind}
-              data={data}
-              outputs={outputs}
-              live={live}
-              connected={connected}
-              editable
-            />
-          </div>
+          {!isTrigger && (
+            <div className="split-right">
+              <MappingPanel
+                nodeId={nodeId}
+                kind={kind}
+                data={data}
+                outputs={outputs}
+                live={live}
+                connected={connected}
+                editable
+              />
+            </div>
+          )}
         </div>
 
         <footer className="dialog-footer">

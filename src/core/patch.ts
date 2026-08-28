@@ -247,6 +247,24 @@ export function createAutosave(options: AutosaveOptions) {
       return acknowledged
     },
 
+    /**
+     * Drop a pending save without performing it.
+     *
+     * For switching to a different document. `reset` clears `pending` but
+     * leaves the debounce timer armed, and the timer's closure writes wherever
+     * the *caller* currently points — so a save scheduled against one document
+     * could land under the identity of the next one. Cancelling first is what
+     * makes the handover safe.
+     */
+    cancel(): void {
+      if (timer !== null) {
+        clearTimer(timer)
+        timer = null
+      }
+      pending = null
+      setState('saved')
+    },
+
     /** Seed after loading an existing draft, so the first patch is a delta. */
     reset(graph: FlowGraph): void {
       acknowledged = graph

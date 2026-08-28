@@ -769,3 +769,17 @@ button.danger.inline { width: auto; margin-top: 0; }
    instead of staying white under a dark page. */
 .react-flow__background { background: var(--bg); }
 .react-flow__background pattern circle { fill: var(--line); }
+
+/* A trigger's dialog has one pane, so it does not need the width two would. */
+.dialog-wide:has(.dialog-body:not(.split)) { width: min(34rem, 100%); }
+
+/* Muted until hovered: archiving takes a webhook address out of service, and a
+   permanently red control beside the flow name reads as a warning about the
+   flow rather than an action available on it. */
+.flow-archive {
+  font-size: .8rem;
+  line-height: 1;
+  padding: .3rem .45rem;
+  color: var(--muted);
+}
+.flow-archive:hover { color: var(--error); border-color: var(--error); }
