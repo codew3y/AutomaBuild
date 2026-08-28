@@ -58,6 +58,9 @@ import './app.css'
 const graphStore = createGraphStore({ initial: SAMPLE_FLOW })
 const editorStore = createEditorStore()
 
+/** Line breaks for window.confirm, which takes plain text. */
+const CONFIRM_NEWLINE = String.fromCharCode(10)
+
 const DRAFT_KEY_BASE = 'automa-flow-canvas:draft'
 
 /**
@@ -1009,15 +1012,15 @@ function Editor() {
               // kept" on its own would read as a promise that they stay
               // visible.
               const ok = window.confirm(
-                `Archive "${current.name}"?
-
-` +
+                [
+                  `Archive "${current.name}"?`,
+                  '',
                   'Its webhook address stops accepting deliveries, and the flow ' +
-                  'and its run history disappear from the editor.
-
-' +
+                    'and its run history disappear from the editor.',
+                  '',
                   'Nothing is deleted — the runs stay in the database — but ' +
-                  'there is no way back to them from here.',
+                    'there is no way back to them from here.',
+                ].join(CONFIRM_NEWLINE),
               )
               if (!ok) return
 
