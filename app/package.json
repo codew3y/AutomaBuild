@@ -15,7 +15,8 @@
     "start": "node src/server.ts",
     "demo": "node src/demo.ts",
     "test": "node --test \"test/*.test.ts\"",
-    "send": "node scripts/send-webhook.mjs"
+    "send": "node scripts/send-webhook.mjs",
+    "smtp:check": "node scripts/smtp-check.mjs"
   },
   "dependencies": {
     "automa-durable-runner": "github:codew3y/automa-durable-runner",
