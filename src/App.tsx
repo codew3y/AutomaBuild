@@ -676,10 +676,19 @@ function Editor() {
    * trigger is called `trigger` — so the sample's fields appeared under the
    * ids of steps that had never produced them.
    */
-  const mappingOutputs = useMemo(
-    () => (connected ? outputsFromRun(run) : SAMPLE_OUTPUTS),
-    [run, connected],
-  )
+  const mappingOutputs = useMemo(() => {
+    // Three cases, and the middle one is the one that was wrong.
+    //
+    // `run` is reset to the bundled sample when the flow changes, so the run
+    // viewer has a graph to draw rather than flashing empty. That made
+    // `connected ? outputsFromRun(run) : SAMPLE_OUTPUTS` derive the sample's
+    // fields anyway whenever a flow had no runs — the exact leak this was
+    // meant to fix, arriving by a different route. `live` is the flag that
+    // says the run is a real one.
+    if (!connected) return SAMPLE_OUTPUTS
+    if (!live) return {}
+    return outputsFromRun(run)
+  }, [run, connected, live])
 
   const runView = useMemo(() => buildRunView(run), [run])
   const runSummary = useMemo(() => summarise(run), [run])
@@ -1249,6 +1258,7 @@ function Editor() {
           webhook={webhook}
           outputs={mappingOutputs}
           live={live}
+          connected={connected}
           onDelete={() => {
             setSetupOpen(false)
             deleteSelected()
@@ -1280,6 +1290,7 @@ function SetupDialog({
   webhook,
   outputs,
   live,
+  connected,
 }: {
   nodeId: string
   kind: string
@@ -1290,6 +1301,7 @@ function SetupDialog({
   /** What earlier steps produced, for the mapping side. */
   outputs: Record<string, unknown>
   live: boolean
+  connected: boolean
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1344,6 +1356,7 @@ function SetupDialog({
               data={data}
               outputs={outputs}
               live={live}
+              connected={connected}
               editable
             />
           </div>
@@ -1383,6 +1396,7 @@ function MappingPanel({
   data,
   outputs: allOutputs,
   live,
+  connected,
   editable,
 }: {
   nodeId: string
@@ -1390,6 +1404,8 @@ function MappingPanel({
   data: Record<string, unknown>
   outputs: Record<string, unknown>
   live: boolean
+  /** Whether a server answered at all, as opposed to this flow having a run. */
+  connected: boolean
   editable: boolean
 }) {
   const nodes = useStore(graphStore, (state) => state.nodes)
@@ -1510,7 +1526,12 @@ function MappingPanel({
 
       <h2 className="tree-heading">
         Available from earlier steps
-        <span className="tree-source muted">{live ? 'from the last run' : 'sample data'}</span>
+        {/* Three states, said plainly. "Sample data" while connected to a
+            server was a lie: the fields were real sample values, but they
+            described a flow that had never produced them. */}
+        <span className="tree-source muted">
+          {!connected ? 'sample data' : live ? 'from the last run' : 'no runs yet'}
+        </span>
       </h2>
 
       {sections.length === 0 ? (
