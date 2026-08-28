@@ -998,10 +998,18 @@ function Editor() {
           one somebody eventually chooses by accident, and this one takes a
           webhook address out of service.
         */}
-        {flowId !== null && !flowList.find((flow) => flow.flowId === flowId)?.isDefault && (
+        {flowId !== null && (
           <button
             className="flow-archive"
-            title="Archive this flow"
+            // Shown disabled on the default rather than hidden. A control that
+            // vanishes leaves someone hunting for a button that is not there;
+            // one that is present and says why answers the question instead.
+            disabled={flowList.find((flow) => flow.flowId === flowId)?.isDefault ?? false}
+            title={
+              flowList.find((flow) => flow.flowId === flowId)?.isDefault === true
+                ? 'The default flow cannot be archived — the server recreates it on every start'
+                : 'Archive this flow'
+            }
             aria-label="Archive this flow"
             onClick={() => {
               const current = flowList.find((flow) => flow.flowId === flowId)
