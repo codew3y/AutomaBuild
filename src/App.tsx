@@ -725,6 +725,9 @@ function Editor() {
           ...node.data,
           kind: node.kind,
           issueCount: viewing ? 0 : (byNode.get(node.id)?.length ?? 0),
+          // The messages themselves, so hovering a red step says what is wrong
+          // with it. There is no list anywhere else any more.
+          issues: viewing ? [] : (byNode.get(node.id) ?? []).map((issue) => issue.message),
           hasError: viewing
             ? false
             : (byNode.get(node.id) ?? []).some((issue) => issue.severity === 'error'),
@@ -864,22 +867,6 @@ function Editor() {
   return (
     <div className="editor">
       <header className="toolbar">
-        {/*
-          The toggle sits at the left edge, next to the panel it controls, so
-          the thing it acts on is obvious without a tooltip. Its pressed state
-          is on aria-pressed rather than only in the icon, because "is the
-          panel open" is exactly what a screen reader user cannot see.
-        */}
-        <button
-          className="panel-toggle"
-          onClick={() => editorStore.getState().toggleLeftPanel()}
-          aria-pressed={leftPanelOpen}
-          aria-label={leftPanelOpen ? 'Hide the left panel' : 'Show the left panel'}
-          title={leftPanelOpen ? 'Hide the left panel' : 'Show the left panel'}
-        >
-          ☰
-        </button>
-
         <strong className="brand">Automabuild</strong>
 
         {/*
@@ -1027,16 +1014,6 @@ function Editor() {
           </>
         )}
 
-        <button
-          className="panel-toggle right"
-          onClick={() => editorStore.getState().toggleRightPanel()}
-          aria-pressed={rightPanelOpen}
-          aria-label={rightPanelOpen ? 'Hide the right panel' : 'Show the right panel'}
-          title={rightPanelOpen ? 'Hide the right panel' : 'Show the right panel'}
-        >
-          ☰
-        </button>
-
         {viewing && (
           <span className="run-summary">
             {live ? '● live' : '○ sample'} · {run.id} · {runSummary.succeeded} ok ·{' '}
@@ -1122,6 +1099,25 @@ function Editor() {
       )}
 
       <div className="workspace">
+        {/*
+          The collapse handle sits against the panel edge rather than in the
+          header, so it points at the thing it acts on instead of being a
+          symbol you have to learn. The chevron shows which way the panel will
+          move, which is the one thing a reader needs from it.
+        */}
+        <button
+          className={leftPanelOpen ? 'edge-toggle' : 'edge-toggle collapsed'}
+          onClick={() => editorStore.getState().toggleLeftPanel()}
+          aria-pressed={leftPanelOpen}
+          aria-label={leftPanelOpen ? 'Hide the step library' : 'Show the step library'}
+          title={leftPanelOpen ? 'Hide the step library' : 'Show the step library'}
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path d="M4 3v10" />
+            <path d="M12 4.5 8.5 8l3.5 3.5" />
+          </svg>
+        </button>
+
         {!leftPanelOpen ? null : viewing ? (
           <RunHistory
             history={history}
@@ -1163,25 +1159,16 @@ function Editor() {
         </ReactFlow>
 
         {/*
-          Hidden unless asked for.
+          Only in History, and always there.
 
-          Mapping lives in the setup dialog now, beside the fields it fills in,
-          so there is nothing here a single click needs. What is left is
-          validation and the run viewer — both worth reaching deliberately, and
-          neither worth a permanent column of canvas.
+          Building a flow needs no side panel now: setup and mapping share one
+          dialog, and a step with a problem says so by turning red. Reading a
+          run is different — the input, output and error of a step have nowhere
+          else to go, and that is the whole reason to open a past run.
         */}
-        {rightPanelOpen && (
+        {viewing && (
           <aside className="panel">
-            {viewing ? (
-              <RunPanel selectedId={selectedNodeId} run={run} live={live} />
-            ) : (
-              <EditPanel
-                selected={selected}
-                issues={issues}
-                onDelete={deleteSelected}
-                onOpenSetup={() => setSetupOpen(true)}
-              />
-            )}
+            <RunPanel selectedId={selectedNodeId} run={run} live={live} />
           </aside>
         )}
       </div>
@@ -1307,69 +1294,6 @@ function SetupDialog({
         </footer>
       </div>
     </div>
-  )
-}
-
-/* ------------------------------------------------------------ edit panel */
-
-function EditPanel({
-  selected,
-  issues,
-  onDelete,
-  onOpenSetup,
-}: {
-  selected: { id: string; kind: string; data: Record<string, unknown> } | null
-  issues: readonly ValidationIssue[]
-  onDelete: () => void
-  onOpenSetup: () => void
-}) {
-  const errors = issues.filter((issue) => issue.severity === 'error')
-  const warnings = issues.filter((issue) => issue.severity === 'warning')
-
-  return (
-    <>
-      <section className="panel-section">
-        <h2>Step</h2>
-        {selected === null ? (
-          <p className="muted">Select a step to see it here.</p>
-        ) : (
-          <>
-            <div className="selected-step">
-              <span>
-                <code>{selected.id}</code> · {selected.kind}
-              </span>
-              <button onClick={onOpenSetup} title="Open the setup dialog">
-                Setup…
-              </button>
-            </div>
-            <button className="danger" onClick={onDelete}>
-              Delete this step
-            </button>
-          </>
-        )}
-      </section>
-
-      <section className="panel-section">
-        <h2>
-          Validation{' '}
-          {errors.length > 0 && <span className="count count-error">{errors.length}</span>}
-          {warnings.length > 0 && <span className="count count-warn">{warnings.length}</span>}
-        </h2>
-        {issues.length === 0 ? (
-          <p className="muted">No problems. Ready to publish.</p>
-        ) : (
-          <ul className="issues">
-            {issues.map((issue, index) => (
-              <li key={index} className={`issue issue-${issue.severity}`}>
-                <button onClick={() => issue.nodeId && editorStore.getState().select(issue.nodeId)}>
-                  {issue.message}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
-    </>
   )
 }
 

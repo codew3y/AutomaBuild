@@ -44,7 +44,10 @@ export const SCHEMAS: Record<string, StepSchema> = {
   },
   branch: { fields: ['condition'], required: ['condition'], label: 'Branch' },
   email: {
-    fields: ['to', 'subject', 'body'],
+    // `from` is optional and falls back to the server's SMTP_FROM. It is listed
+    // first because it is the field someone changes once per flow and then
+    // leaves alone, unlike the three below it.
+    fields: ['from', 'to', 'subject', 'body'],
     required: ['to', 'body'],
     label: 'Send email',
     multiline: ['body'],

@@ -668,3 +668,66 @@ button.danger.inline { width: auto; margin-top: 0; }
   color: var(--fg);
   max-width: 14rem;
 }
+
+/* ------------------------------------------------ validation on the canvas */
+
+/* With no validation panel, the step itself has to carry the news. An outline
+   as well as a border colour, because a 1px border against a coloured left
+   edge is easy to miss on a busy canvas — and the tinted background makes a
+   broken step findable without reading any of them. */
+.step-node[data-error='true'] {
+  border-color: var(--error);
+  outline: 2px solid var(--error);
+  outline-offset: 1px;
+  background: color-mix(in srgb, var(--error) 10%, var(--bg));
+}
+
+/* A warning is not an error: it does not block publishing, so it is marked
+   without shouting. */
+.step-node[data-warn='true'] {
+  border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg));
+}
+.step-node[data-warn='true'] .step-badge { background: var(--warn); }
+
+/* ------------------------------------------------------- collapse handle */
+
+/* Against the panel edge rather than in the header, so it points at what it
+   acts on. It floats over the canvas, which is why it needs its own background
+   and shadow — the dot grid behind it would otherwise read straight through. */
+.edge-toggle {
+  position: absolute;
+  top: .6rem;
+  left: calc(14rem + .5rem);
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  width: 1.65rem;
+  height: 1.65rem;
+  padding: 0;
+  border: 1px solid var(--accent);
+  border-radius: .3rem;
+  background: var(--bg);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / .15);
+  transition: left .12s ease;
+}
+.edge-toggle:hover { background: var(--panel); }
+
+/* When the panel is gone the handle takes its place at the canvas edge, and
+   the chevron flips to point the way the panel will come back. */
+.edge-toggle.collapsed { left: .5rem; }
+.edge-toggle.collapsed svg { transform: scaleX(-1); }
+
+.edge-toggle svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The workspace becomes the positioning context for the handle. */
+.workspace { position: relative; }

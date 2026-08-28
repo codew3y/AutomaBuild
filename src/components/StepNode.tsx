@@ -23,6 +23,8 @@ export interface StepNodeData extends Record<string, unknown> {
   /** Validation problems attached to this node, for the outline and the badge. */
   readonly issueCount?: number
   readonly hasError?: boolean
+  /** The problems themselves, so the node can say what is wrong with it. */
+  readonly issues?: readonly string[]
   /** Set only in the run viewer. */
   readonly outcome?: string
   readonly durationMs?: number
@@ -46,6 +48,9 @@ const KIND_STYLE: Record<string, { accent: string; glyph: string }> = {
   email: { accent: '#ec4899', glyph: '✉' },
 }
 
+/** One problem per line in the tooltip. */
+const NEWLINE = String.fromCharCode(10)
+
 function StepNodeComponent({ data, selected, id }: NodeProps) {
   const stepData = data as StepNodeData
   const style = KIND_STYLE[stepData.kind] ?? { accent: '#64748b', glyph: '•' }
@@ -57,7 +62,18 @@ function StepNodeComponent({ data, selected, id }: NodeProps) {
       className="step-node"
       data-selected={selected ? 'true' : undefined}
       data-error={stepData.hasError ? 'true' : undefined}
+      data-warn={
+        !stepData.hasError && (stepData.issueCount ?? 0) > 0 ? 'true' : undefined
+      }
       data-outcome={stepData.outcome}
+      // The problems, on hover. With no validation panel left, the node is the
+      // only place that can say why it is red — and a red box with no
+      // explanation is worse than no colour at all.
+      title={
+        stepData.issues !== undefined && stepData.issues.length > 0
+          ? stepData.issues.join(NEWLINE)
+          : undefined
+      }
       style={{ '--accent': style.accent } as React.CSSProperties}
     >
       {/* A trigger has no input: nothing runs before it, so offering a target
@@ -87,13 +103,11 @@ function StepNodeComponent({ data, selected, id }: NodeProps) {
         </span>
       )}
 
+      {/* The badge has no title of its own: the node already carries the
+          problems, and a tooltip here saying only how many would replace them
+          on hover. */}
       {stepData.issueCount !== undefined && stepData.issueCount > 0 && (
-        <span
-          className="step-badge"
-          title={`${stepData.issueCount} problem${stepData.issueCount === 1 ? '' : 's'}`}
-        >
-          {stepData.issueCount}
-        </span>
+        <span className="step-badge">{stepData.issueCount}</span>
       )}
 
       {isBranch ? (
