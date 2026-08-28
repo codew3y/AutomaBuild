@@ -59,6 +59,7 @@ import { registerApiAuth, resolveApiKey } from './auth.ts'
 import { compileFlow, type CanvasGraph } from './flow.ts'
 import { FlowStore, type FlowRef } from './flow-store.ts'
 import { EndpointStore, type Endpoint } from './endpoint-store.ts'
+import { FlowCatalog } from './flow-catalog.ts'
 import { resolveSecrets } from './secret-source.ts'
 import { mappingHandlers } from './handlers.ts'
 import { toViewerListing, toViewerRun, type ViewerGraph } from './runs.ts'
@@ -107,6 +108,7 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
 
   const flows = new FlowStore({ pool: runnerPool })
   const endpoints = new EndpointStore(runnerPool)
+  const catalog = new FlowCatalog(runnerPool)
 
   // The endpoint in the environment is a *seed*, not the only one. It exists so
   // a fresh database has something to receive a webhook on; every other
@@ -148,6 +150,10 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
       `moved endpoint ${seedEndpoint.endpointId} off a plaintext secret to env:WEBHOOK_SECRETS`,
     )
   }
+
+  // The seeded flow needs a name like any other, or it would be the one entry
+  // in the editor's list with nothing to call it.
+  await catalog.ensure(seedEndpoint.flowId, seedEndpoint.tenantId, 'Demo flow')
 
   const seedRef: FlowRef = { tenantId: seedEndpoint.tenantId, flowId: seedEndpoint.flowId }
 
@@ -246,7 +252,7 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
     },
   })
 
-  registerApi(app, runnerPool, flows, endpoints, seedEndpoint)
+  registerApi(app, runnerPool, flows, endpoints, catalog, seedEndpoint)
   await registerCanvas(app, config)
 
   const worker =
@@ -333,6 +339,7 @@ function registerApi(
   pool: ReturnType<typeof createRunnerPool>,
   flows: FlowStore,
   endpoints: EndpointStore,
+  catalog: FlowCatalog,
   seed: Endpoint,
 ): void {
   /**
@@ -345,7 +352,18 @@ function registerApi(
    * the query string, would be an invitation to type someone else's.
    */
   const scopeOf = async (request: FastifyRequest): Promise<Endpoint | null> => {
-    const requested = (request.query as { endpoint?: string }).endpoint
+    const query = request.query as { endpoint?: string; flow?: string }
+
+    // `?flow=` is what the editor sends, because it thinks in flows and there
+    // is exactly one endpoint per flow. `?endpoint=` still works for anything
+    // holding a webhook URL rather than a flow id.
+    if (query.flow !== undefined) {
+      const found = await catalog.byId(query.flow)
+      if (found === null || found.endpointId === null) return null
+      return endpoints.byId(found.endpointId)
+    }
+
+    const requested = query.endpoint
     if (requested === undefined || requested === seed.endpointId) return seed
     return endpoints.byId(requested)
   }
@@ -359,6 +377,81 @@ function registerApi(
    * it. The secret is deliberately not here: this endpoint is unauthenticated,
    * and the whole point of the secret is that possessing it proves who you are.
    */
+  app.get('/api/flows', async () => {
+    const all = await catalog.list(seed.tenantId)
+    return all.map((flow) => ({
+      flowId: flow.flowId,
+      name: flow.name,
+      endpointId: flow.endpointId,
+      scheme: flow.scheme,
+      isDefault: flow.flowId === seed.flowId,
+    }))
+  })
+
+  /**
+   * Create a flow, and the endpoint it receives on.
+   *
+   * The two are made together because they are useless apart: a flow with no
+   * endpoint can never be triggered, and creating them separately leaves a
+   * window where one exists without the other.
+   *
+   * The new endpoint reuses the same secret reference as the seeded one by
+   * default, so a flow created from the editor can receive a delivery
+   * immediately. Point it somewhere else with `secretRefs` when the sender is
+   * a different service with its own secret.
+   */
+  app.post('/api/flows', async (request, reply) => {
+    const body = request.body as
+      | { name?: string; scheme?: string; secretRefs?: string[] }
+      | undefined
+
+    const name = (body?.name ?? '').trim()
+    if (name === '') return reply.code(400).send({ error: 'a flow needs a name' })
+
+    const scheme = body?.scheme ?? seed.scheme
+    if (!['stripe', 'github', 'slack', 'standard'].includes(scheme)) {
+      return reply.code(400).send({ error: `${scheme} is not a scheme this verifies` })
+    }
+
+    const refs = body?.secretRefs ?? ['env:WEBHOOK_SECRETS']
+    const raw = refs.filter((ref) => !/^(env|file|literal):/.test(String(ref)))
+    if (raw.length > 0) {
+      return reply.code(400).send({
+        error:
+          'each secret must be a reference — env:NAME or file:/path. ' +
+          'To store a value in the database anyway, write it as literal:VALUE and know that it is plaintext.',
+      })
+    }
+
+    try {
+      const created = await catalog.create({
+        tenantId: seed.tenantId,
+        name,
+        scheme: scheme as Endpoint['scheme'],
+        secretRefs: refs,
+      })
+      console.log(`created flow ${created.flowId} (${created.name})`)
+      return reply.code(201).send({
+        flowId: created.flowId,
+        name: created.name,
+        endpointId: created.endpointId,
+        scheme: created.scheme,
+      })
+    } catch (error) {
+      return reply.code(400).send({ error: (error as Error).message })
+    }
+  })
+
+  app.patch('/api/flows/:flowId', async (request, reply) => {
+    const { flowId } = request.params as { flowId: string }
+    const name = ((request.body as { name?: string } | undefined)?.name ?? '').trim()
+    if (name === '') return reply.code(400).send({ error: 'a flow needs a name' })
+
+    const renamed = await catalog.rename(flowId, seed.tenantId, name)
+    if (!renamed) return reply.code(404).send({ error: 'no such flow' })
+    return { flowId, name }
+  })
+
   app.get('/api/endpoints', async () => {
     // Secrets are deliberately absent, and `secretSources` is not a leak: it
     // says *where* each secret lives, never what it is. A UI that displayed a
