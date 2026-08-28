@@ -385,7 +385,21 @@ function Editor() {
    * genuine executions when there is something to show. A version that
    * *required* a server would be a worse portfolio piece — it would not open.
    */
+  /** Everything scoped to a flow carries this. */
+  const scope = flowId === null ? '' : `?flow=${encodeURIComponent(flowId)}`
+
   const [run, setRun] = useState<RunRecord>(SAMPLE_RUN)
+
+  /**
+   * Two different questions, which used to be one.
+   *
+   * `connected` is whether a server answered at all. `live` is whether *this
+   * flow* has a run to show. Conflating them meant a flow that had never
+   * received a webhook still displayed the bundled sample's fields — under its
+   * own step ids, because a new flow's trigger is also called `trigger` — so
+   * the editor offered fields that had never existed anywhere.
+   */
+  const [connected, setConnected] = useState(false)
   const [live, setLive] = useState(false)
   const [history, setHistory] = useState<readonly RunListing[]>([describeRun(SAMPLE_RUN)])
   const [loadingRun, setLoadingRun] = useState(false)
@@ -396,7 +410,16 @@ function Editor() {
   const renderedAt = useRef(Date.now()).current
 
   useEffect(() => {
+    if (flowId === null) return
     let cancelled = false
+
+    // Everything here belongs to one flow. Without this reset the previous
+    // flow's run stayed on screen until the new request came back — and if the
+    // new flow had never run, it stayed for good, so its fields showed up in
+    // the mapping panel of a flow that had never produced them.
+    setRun(SAMPLE_RUN)
+    setHistory([])
+    setLive(false)
 
     // The listing and the latest run are two requests because they are two
     // different costs: the list is one cheap query, the run carries its whole
@@ -413,8 +436,12 @@ function Editor() {
     ])
       .then(([listings, latest]: [RunListing[] | null, RunRecord | null]) => {
         if (cancelled) return
-        // A run without steps is not a run this viewer can render, so it is
-        // treated as no backend rather than as an empty run.
+
+        // An answer at all — even an empty list — means there is a server, and
+        // that its answer for this flow is "nothing yet" rather than "no idea".
+        setConnected(true)
+
+        // A run without steps is not a run this viewer can render.
         if (latest !== null && Array.isArray(latest.steps)) {
           setRun(latest)
           setLive(true)
@@ -437,10 +464,8 @@ function Editor() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [flowId, scope])
 
-  /** Everything scoped to a flow carries this. */
-  const scope = flowId === null ? '' : `?flow=${encodeURIComponent(flowId)}`
 
   const loadFlows = useCallback((select?: string) => {
     apiFetch('api/flows')
@@ -638,10 +663,23 @@ function Editor() {
    * something to show on a flow that has never run, and so the editor opened
    * from a static host is not empty.
    */
-  const mappingOutputs = useMemo(() => {
-    const fromRun = outputsFromRun(run)
-    return live ? { ...SAMPLE_OUTPUTS, ...fromRun } : SAMPLE_OUTPUTS
-  }, [run, live])
+  /**
+   * What the mapping panel offers.
+   *
+   * With a server, only what *this* flow actually produced — so a webhook
+   * trigger offers the shape of the payloads it has really received, and a
+   * flow that has never run offers nothing rather than another flow's fields.
+   *
+   * The sample is the fallback for having no server at all, which is the case
+   * the editor opened from a static host is in. Merging it underneath a real
+   * run was the bug: node ids are not unique across flows — every flow's
+   * trigger is called `trigger` — so the sample's fields appeared under the
+   * ids of steps that had never produced them.
+   */
+  const mappingOutputs = useMemo(
+    () => (connected ? outputsFromRun(run) : SAMPLE_OUTPUTS),
+    [run, connected],
+  )
 
   const runView = useMemo(() => buildRunView(run), [run])
   const runSummary = useMemo(() => summarise(run), [run])
