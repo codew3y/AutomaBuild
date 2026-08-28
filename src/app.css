@@ -1,8 +1,17 @@
 /* Desktop only, and the README says so. A flow canvas on a phone is a
    different product, not a responsive version of this one. */
 
+/* Three theme states, not two.
+ *
+ * An explicit choice sets data-theme on the root; leaving it to the system
+ * sets nothing, and only prefers-color-scheme separates light from dark. So
+ * the light palette is defined on bare :root and is the floor everything else
+ * builds on, the media query is guarded so an explicit "light" beats a dark
+ * system, and the [data-theme='dark'] block repeats the same values so an
+ * explicit "dark" beats a light system. Miss either guard and the toggle works
+ * in one direction only. */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --bg: #ffffff;
   --fg: #0f172a;
   --muted: #64748b;
@@ -15,7 +24,8 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
     --bg: #0b1120;
     --fg: #e2e8f0;
     --muted: #94a3b8;
@@ -25,6 +35,18 @@
     --warn: #fbbf24;
     --ok: #4ade80;
   }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0b1120;
+  --fg: #e2e8f0;
+  --muted: #94a3b8;
+  --line: #1e293b;
+  --panel: #0f172a;
+  --error: #f87171;
+  --warn: #fbbf24;
+  --ok: #4ade80;
 }
 
 * { box-sizing: border-box; }
@@ -731,3 +753,19 @@ button.danger.inline { width: auto; margin-top: 0; }
 
 /* The workspace becomes the positioning context for the handle. */
 .workspace { position: relative; }
+
+/* ------------------------------------------------------------ theme toggle */
+
+.theme-toggle {
+  font-size: .95rem;
+  line-height: 1;
+  padding: .3rem .5rem;
+  color: var(--muted);
+}
+.theme-toggle:hover { color: var(--fg); }
+
+/* React Flow paints its own background colour for the dot grid, which does not
+   follow our tokens. Setting it here keeps the canvas in step with the theme
+   instead of staying white under a dark page. */
+.react-flow__background { background: var(--bg); }
+.react-flow__background pattern circle { fill: var(--line); }

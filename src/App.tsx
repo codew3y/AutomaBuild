@@ -43,6 +43,14 @@ import { buildRunView, outputsFromRun, summarise, type RunRecord } from './core/
 import { describeRun, relativeTime, sortHistory, type RunListing } from './core/history.ts'
 import { diffGraph } from './core/patch.ts'
 import { apiFetch, readApiKey, writeApiKey, UnauthorizedError } from './core/api.ts'
+import {
+  applyTheme,
+  nextTheme,
+  readTheme,
+  themeGlyph,
+  themeLabel,
+  type Theme,
+} from './core/theme.ts'
 import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
 import { EMPTY_FLOW, SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
@@ -307,6 +315,15 @@ function Editor() {
    * which case the setup panel says so rather than showing a URL that is not
    * listening.
    */
+  const [theme, setTheme] = useState<Theme>(() => readTheme())
+
+  // Applied as an effect rather than during render, because it touches the
+  // document: a render that mutates the DOM outside React is one React may run
+  // twice in development and then disagree with.
+  useEffect(() => {
+    applyTheme(theme)
+  }, [theme])
+
   const [webhook, setWebhook] = useState<WebhookInfo | null>(null)
 
   /**
@@ -933,6 +950,15 @@ function Editor() {
         </div>
 
         <div className="spacer" />
+
+        <button
+          className="theme-toggle"
+          onClick={() => setTheme((current) => nextTheme(current))}
+          aria-label={`Theme: ${themeLabel(theme)}`}
+          title={`Theme: ${themeLabel(theme)} — click to change`}
+        >
+          {themeGlyph(theme)}
+        </button>
 
         {!viewing && (
           <>
