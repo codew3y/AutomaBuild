@@ -52,153 +52,12 @@ const editorStore = createEditorStore()
 
 const DRAFT_KEY = 'automa-flow-canvas:draft'
 
-export interface EndpointSummary {
-  readonly endpointId: string
-  readonly flowId: string
-  readonly scheme: string
-  readonly disabled: boolean
-  readonly isDefault: boolean
-  /** Where each secret lives — never the secret itself. */
-  readonly secretSources: readonly string[]
-  readonly secretProblems: readonly string[]
-}
-
 export interface WebhookInfo {
   readonly url: string
   readonly endpointId: string
   readonly scheme: string
   readonly signatureHeader: string
   readonly secretConfigured: boolean
-}
-
-/**
- * The endpoints this tenant receives on.
- *
- * Creating one takes a *reference* to a secret rather than a secret. That is
- * not friction for its own sake: a form that accepts a raw value would put it
- * in a request body, a proxy log and the database in one move, and the whole
- * reference scheme exists so the database does not hold credentials.
- */
-function EndpointsDialog({
-  endpoints,
-  onClose,
-  onCreated,
-}: {
-  readonly endpoints: readonly EndpointSummary[]
-  readonly onClose: () => void
-  readonly onCreated: () => void
-}) {
-  const [scheme, setScheme] = useState('stripe')
-  const [secretRef, setSecretRef] = useState('env:')
-  const [error, setError] = useState<string | null>(null)
-  const [creating, setCreating] = useState(false)
-
-  const create = () => {
-    setCreating(true)
-    setError(null)
-    apiFetch('api/endpoints', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ scheme, secretRefs: [secretRef.trim()] }),
-    })
-      .then(async (response) => {
-        const data = (await response.json()) as { error?: string }
-        if (!response.ok) throw new Error(data.error ?? `failed (${response.status})`)
-        setSecretRef('env:')
-        onCreated()
-      })
-      .catch((problem: unknown) => {
-        setError(problem instanceof Error ? problem.message : String(problem))
-      })
-      .finally(() => setCreating(false))
-  }
-
-  return (
-    <div
-      className="dialog-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose()
-      }}
-    >
-      <div className="dialog" role="dialog" aria-modal="true" aria-label="Endpoints">
-        <header className="dialog-header">
-          <div>
-            <strong>Endpoints</strong>
-            <span className="muted"> where webhooks arrive</span>
-          </div>
-          <button className="dismiss" onClick={onClose} aria-label="Close" title="Close (Esc)">
-            ✕
-          </button>
-        </header>
-
-        <div className="dialog-body">
-          <ul className="endpoint-list">
-            {endpoints.map((endpoint) => (
-              <li key={endpoint.endpointId} className={endpoint.disabled ? 'is-disabled' : undefined}>
-                <div className="endpoint-row">
-                  <code>{endpoint.endpointId}</code>
-                  {endpoint.isDefault && <span className="tag">default</span>}
-                  {endpoint.disabled && <span className="tag tag-off">disabled</span>}
-                </div>
-                <div className="muted endpoint-row-meta">
-                  {endpoint.scheme} · secret from{' '}
-                  {endpoint.secretSources.map((source, index) => (
-                    <span
-                      key={source + String(index)}
-                      className={source.startsWith('literal') ? 'endpoint-warn' : undefined}
-                    >
-                      {index > 0 ? ', ' : ''}
-                      {source}
-                    </span>
-                  ))}
-                </div>
-                {endpoint.secretProblems.map((problem) => (
-                  <div key={problem} className="endpoint-warn endpoint-row-meta">
-                    {problem}
-                  </div>
-                ))}
-              </li>
-            ))}
-          </ul>
-
-          <h3>Add one</h3>
-          <label className="field">
-            <span>scheme</span>
-            <select value={scheme} onChange={(event) => setScheme(event.target.value)}>
-              <option value="stripe">stripe</option>
-              <option value="github">github</option>
-              <option value="slack">slack</option>
-              <option value="standard">standard webhooks</option>
-            </select>
-          </label>
-
-          <label className="field">
-            <span>where the signing secret lives</span>
-            <input
-              value={secretRef}
-              onChange={(event) => setSecretRef(event.target.value)}
-              placeholder="env:MY_HOOK_SECRET"
-            />
-          </label>
-          <p className="muted endpoint-hint">
-            A reference, not the secret: <code>env:NAME</code> reads it from the
-            server's environment, <code>file:/path</code> from disk. The database
-            records where it lives rather than what it is.
-          </p>
-
-          {error !== null && <p className="endpoint-warn">{error}</p>}
-        </div>
-
-        <footer className="dialog-footer">
-          <div className="spacer" />
-          <button onClick={create} disabled={creating || secretRef.trim().length < 5}>
-            {creating ? 'Adding…' : 'Add endpoint'}
-          </button>
-          <button onClick={onClose}>Done</button>
-        </footer>
-      </div>
-    </div>
-  )
 }
 
 /**
@@ -440,8 +299,6 @@ function Editor() {
    * stop someone doing the work they can still do.
    */
   const [needsKey, setNeedsKey] = useState(false)
-  const [endpointList, setEndpointList] = useState<readonly EndpointSummary[]>([])
-  const [endpointsOpen, setEndpointsOpen] = useState(false)
 
   const { screenToFlowPosition } = useReactFlow()
 
@@ -518,21 +375,6 @@ function Editor() {
       cancelled = true
     }
   }, [])
-
-  const loadEndpoints = useCallback(() => {
-    apiFetch('api/endpoints')
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data: EndpointSummary[] | null) => {
-        if (Array.isArray(data)) setEndpointList(data)
-      })
-      .catch((error: unknown) => {
-        if (error instanceof UnauthorizedError) setNeedsKey(true)
-      })
-  }, [])
-
-  useEffect(() => {
-    loadEndpoints()
-  }, [loadEndpoints])
 
   useEffect(() => {
     let cancelled = false
@@ -1059,16 +901,6 @@ function Editor() {
           </>
         )}
 
-        {webhook !== null && (
-          <button
-            onClick={() => setEndpointsOpen(true)}
-            title="Where webhooks arrive"
-          >
-            Endpoints
-            {endpointList.length > 1 && <span className="count">{endpointList.length}</span>}
-          </button>
-        )}
-
         <button
           className="panel-toggle right"
           onClick={() => editorStore.getState().toggleRightPanel()}
@@ -1086,14 +918,6 @@ function Editor() {
           </span>
         )}
       </header>
-
-      {endpointsOpen && (
-        <EndpointsDialog
-          endpoints={endpointList}
-          onClose={() => setEndpointsOpen(false)}
-          onCreated={loadEndpoints}
-        />
-      )}
 
       {needsKey && (
         <div className="restored needs-key" role="alert">
@@ -1416,11 +1240,15 @@ function EditPanel({
 /**
  * The mapping panel.
  *
- * Two halves. The tree shows what earlier steps produced; clicking a leaf
- * inserts a reference into the field being edited. The preview shows what that
- * reference resolves to — which is the half that earns the panel, because
- * `{{ steps.fetch.output.email }}` tells you what you typed and
- * `sam@example.com` tells you whether it is right.
+ * One collapsible section per upstream step, each listing what that step
+ * produced. Clicking a field inserts a reference into whichever setup field is
+ * being edited — which is the only way to insert at all, because selecting a
+ * step is for reading it and editing happens in the setup dialog.
+ *
+ * There is deliberately no field picker here. It used to carry its own
+ * dropdown of `to / subject / body`, which meant two places decided where a
+ * click would land and they could disagree. The setup dialog is the one place
+ * that decides now.
  *
  * Only *ancestors* are offered. Listing every step would invite exactly the
  * mapping the validation then rejects, which is a poor way to learn a rule.
@@ -1444,7 +1272,11 @@ function MappingPanel({
   const edges = useStore(graphStore, (state) => state.edges)
   const focusedField = useStore(editorStore, (state) => state.focusedField)
   const fields = SCHEMAS[kind]?.fields ?? []
-  const [activeField, setActiveField] = useState(fields[0] ?? '')
+
+  /** Which sections are open. Several at once, because comparing two steps'
+   *  output is a normal thing to want and an accordion that closes the last
+   *  one makes that impossible. */
+  const [open, setOpen] = useState<ReadonlySet<string>>(new Set())
 
   const available = useMemo(() => {
     const upstream = ancestors({ nodes, edges }, nodeId)
@@ -1455,81 +1287,51 @@ function MappingPanel({
     return outputs
   }, [nodes, edges, nodeId, allOutputs])
 
-  // Which upstream steps have nothing to offer. A panel that silently lists
-  // three of five ancestors looks like the other two produce nothing, when the
-  // truth is they have not run yet — and that is fixable by running the flow.
-  const withoutData = useMemo(() => {
-    const upstream = ancestors({ nodes, edges }, nodeId)
-    return [...upstream].filter((id) => allOutputs[id] === undefined)
-  }, [nodes, edges, nodeId, allOutputs])
-
   /**
-   * Where a clicked reference goes.
+   * The upstream steps, in flow order, with whatever each produced.
    *
-   * The field being edited in the setup dialog wins over this panel’s own
-   * picker. Someone with the dialog open is looking at a field; making them
-   * re-select it in a second dropdown to fill it in is asking them to say the
-   * same thing twice.
+   * Steps with no recorded output are kept in the list rather than dropped.
+   * Omitting them implies they produce nothing; the truth is they have not run
+   * yet, which is fixable by running the flow — and a list that silently omits
+   * half the flow is one nobody can trust.
    */
-  const target = focusedField?.nodeId === nodeId ? focusedField.field : activeField
-  const targetValue = String(data[target] ?? '')
-
-  /**
-   * The upstream steps that actually produced something, in flow order.
-   *
-   * Flow order rather than the order `ancestors` happens to return, because a
-   * dropdown that reshuffles between renders is one nobody can build a habit
-   * with. The label is what a person named the step; the id is the fallback
-   * for a step they never renamed.
-   */
-  const sources = useMemo(() => {
+  const sections = useMemo(() => {
     const upstream = ancestors({ nodes, edges }, nodeId)
     return nodes
-      .filter((node) => upstream.has(node.id) && allOutputs[node.id] !== undefined)
-      .map((node) => ({ id: node.id, label: String(node.data?.label ?? node.id) }))
+      .filter((node) => upstream.has(node.id))
+      .map((node) => {
+        const output = allOutputs[node.id]
+        const leaves =
+          output === undefined
+            ? []
+            : outputTree({ [node.id]: output } as Record<string, { output: unknown }>).filter(
+                // The step's own root row is redundant inside its own section.
+                (leaf) => leaf.path !== node.id,
+              )
+        return {
+          id: node.id,
+          label: String(node.data?.label ?? node.id),
+          hasOutput: output !== undefined,
+          leaves,
+        }
+      })
   }, [nodes, edges, nodeId, allOutputs])
 
-  /**
-   * Which step's fields to show.
-   *
-   * Defaults to the nearest one, which is almost always what a mapping refers
-   * to — you reshape what the step before you just produced far more often
-   * than something five steps back. Empty string means all of them.
-   */
-  const [source, setSource] = useState<string | null>(null)
-  const activeSource = source ?? sources[sources.length - 1]?.id ?? ''
+  /** The setup field a click fills in. Only the dialog sets this. */
+  const target = focusedField?.nodeId === nodeId ? focusedField.field : ''
+  const targetValue = String(data[target] ?? '')
 
-  // A step that was renamed or deleted must not leave the picker pointing at
-  // something that is no longer there, showing an empty tree with no clue why.
-  useEffect(() => {
-    if (source !== null && source !== '' && !sources.some((entry) => entry.id === source)) {
-      setSource(null)
-    }
-  }, [source, sources])
-
-  const allLeaves = useMemo(() => outputTree(available), [available])
-
-  const leaves = useMemo(
-    () =>
-      activeSource === ''
-        ? allLeaves
-        : allLeaves.filter((leaf) => leaf.path.startsWith(`${activeSource}.`)),
-    [allLeaves, activeSource],
-  )
-  const currentValue = targetValue
   const preview = useMemo(
-    () => resolveTemplate(currentValue, available),
-    [currentValue, available],
+    () => resolveTemplate(targetValue, available),
+    [targetValue, available],
   )
-
 
   const insert = useCallback(
     (path: string) => {
-      // Belt as well as braces: the buttons are disabled when not editable, but
-      // a panel that can write to a step while no dialog is open is the bug
-      // being fixed, and it should not depend on a `disabled` attribute.
-      if (!editable) return
-      if (target === '') return
+      // Belt as well as braces: the buttons are disabled without a target, but
+      // a panel that can write to a step while no dialog is open is a bug this
+      // has had before, and it should not rest on a `disabled` attribute.
+      if (!editable || target === '') return
       const next = `${targetValue}${targetValue.length > 0 ? ' ' : ''}${referenceFor(path)}`
       graphStore.getState().updateNodeData(nodeId, { [target]: next })
       graphStore.endGesture()
@@ -1537,129 +1339,125 @@ function MappingPanel({
     [editable, target, targetValue, nodeId],
   )
 
+  const toggle = (id: string) => {
+    setOpen((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
   if (fields.length === 0) {
     return <p className="muted">This step has no fields to map into.</p>
   }
 
   return (
     <>
-      <label className="field">
-        <span>
-          field
-          {focusedField?.nodeId === nodeId && (
-            <span className="field-locked"> · editing in setup</span>
-          )}
-        </span>
-        <select
-          value={target}
-          onChange={(event) => {
-            // Choosing here takes over from the dialog, so the two cannot
-            // disagree about what a click will fill in.
-            editorStore.getState().clearFocusedField()
-            setActiveField(event.target.value)
-          }}
-        >
-          {fields.map((field) => (
-            <option key={field} value={field}>
-              {field}
-            </option>
-          ))}
-        </select>
-      </label>
+      {target === '' ? (
+        <p className="muted tree-readonly">
+          {editable
+            ? 'Click a field in the setup dialog, then pick a value below to fill it in.'
+            : 'Looking, not editing. Double-click the step — or press Setup… — to insert any of these.'}
+        </p>
+      ) : (
+        <>
+          <p className="muted target-note">
+            filling in <span className="field-locked">{target}</span>
+          </p>
 
-      <div className="preview">
-        <span className="preview-label">preview</span>
-        {currentValue === '' ? (
-          <em className="muted">empty</em>
-        ) : preview.missing.length > 0 ? (
-          <span className="preview-missing" title={`Unresolved: ${preview.missing.join(', ')}`}>
-            {preview.text}
-          </span>
-        ) : (
-          <span className="preview-value">
-            {preview.single && typeof preview.value !== 'string'
-              ? JSON.stringify(preview.value)
-              : preview.text}
-          </span>
-        )}
-      </div>
+          <div className="preview">
+            <span className="preview-label">preview</span>
+            {targetValue === '' ? (
+              <em className="muted">empty</em>
+            ) : preview.missing.length > 0 ? (
+              <span
+                className="preview-missing"
+                title={`Unresolved: ${preview.missing.join(', ')}`}
+              >
+                {preview.text}
+              </span>
+            ) : (
+              <span className="preview-value">{preview.text}</span>
+            )}
+          </div>
+        </>
+      )}
 
       <h2 className="tree-heading">
         Available from earlier steps
-        <span className="tree-source muted">{live ? "from the last run" : "sample data"}</span>
+        <span className="tree-source muted">{live ? 'from the last run' : 'sample data'}</span>
       </h2>
 
-      {!editable && (
-        <p className="muted tree-readonly">
-          Looking, not editing. Double-click the step — or press Setup… — to
-          insert any of these.
-        </p>
-      )}
-
-      {sources.length > 0 && (
-        <label className="field">
-          <span>from step</span>
-          <select value={activeSource} onChange={(event) => setSource(event.target.value)}>
-            {sources.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.label}
-                {entry.label === entry.id ? '' : ` (${entry.id})`}
-              </option>
-            ))}
-            {/* Kept last: it is the escape hatch, not the starting point. With
-                several steps upstream the combined tree is long enough that
-                finding anything in it is worse than picking a step first. */}
-            <option value="">all steps ({sources.length})</option>
-          </select>
-        </label>
-      )}
-
-      {/* Naming the steps with no data is the difference between "this step
-          produces nothing" and "this step has not run yet" — the second is
-          fixable by running the flow, and the panel used to imply the first. */}
-      {withoutData.length > 0 && (
-        <p className="muted tree-missing">
-          No recorded output yet for {withoutData.map((id) => <code key={id}>{id}</code>).reduce((all, one, i) => (i === 0 ? [one] : [...all, ", ", one]), [] as React.ReactNode[])}
-          . Run the flow once and their fields will appear here.
-        </p>
-      )}
-
-      {leaves.length === 0 ? (
+      {sections.length === 0 ? (
         <p className="muted">
           Nothing runs before this step yet. Connect it to something upstream first.
         </p>
       ) : (
-        <ul className="tree">
-          {leaves.map((leaf) => (
-            <li key={leaf.path}>
-              <button
-                className="pill"
-                onClick={() => insert(leaf.path)}
-                disabled={!editable || leaf.kind === 'object' || leaf.kind === 'array'}
-                title={
-                  leaf.kind === 'object' || leaf.kind === 'array'
-                    ? 'Pick a field inside this'
-                    : editable
-                      ? `Insert ${referenceFor(leaf.path)}`
-                      : `${referenceFor(leaf.path)} — open Setup to insert it`
-                }
-              >
-                {/* Nesting is shown by indenting the name only. Indenting the
-                    whole row shifts the kind and value columns with it, so
-                    nothing lines up down the list. */}
-                <span
-                  className="pill-key"
-                  style={{ paddingLeft: `${(leaf.depth - 1) * 0.7}rem` }}
+        <ul className="sources">
+          {sections.map((section) => {
+            const isOpen = open.has(section.id)
+            return (
+              <li key={section.id}>
+                <button
+                  className="source-head"
+                  onClick={() => toggle(section.id)}
+                  aria-expanded={isOpen}
+                  disabled={!section.hasOutput}
+                  title={
+                    section.hasOutput
+                      ? `${isOpen ? 'Hide' : 'Show'} what ${section.label} produced`
+                      : `${section.label} has not run yet`
+                  }
                 >
-                  {leaf.key}
-                </span>
-                <span className={`pill-kind kind-${leaf.kind}`}>{leaf.kind}</span>
-                {leaf.kind !== 'object' && leaf.kind !== 'array' && (
-                  <span className="pill-value">{String(leaf.value)}</span>
+                  <span className="source-caret" aria-hidden="true">
+                    {section.hasOutput ? (isOpen ? '▾' : '▸') : '·'}
+                  </span>
+                  <span className="source-name">{section.label}</span>
+                  <span className="source-count muted">
+                    {section.hasOutput ? section.leaves.length : 'not run yet'}
+                  </span>
+                </button>
+
+                {isOpen && (
+                  <ul className="tree">
+                    {section.leaves.map((leaf) => {
+                      const container = leaf.kind === 'object' || leaf.kind === 'array'
+                      return (
+                        <li key={leaf.path}>
+                          <button
+                            className="pill"
+                            onClick={() => insert(leaf.path)}
+                            disabled={!editable || target === '' || container}
+                            title={
+                              container
+                                ? 'Pick a field inside this'
+                                : target === ''
+                                  ? `${referenceFor(leaf.path)} — click a setup field first`
+                                  : `Insert ${referenceFor(leaf.path)} into ${target}`
+                            }
+                          >
+                            {/* The dotted path rather than an indent. Indenting
+                                shifted the text of every row by its depth, so
+                                the names never lined up even though their
+                                columns did — and the path says where a field
+                                sits more precisely than an indent ever could. */}
+                            <span className="pill-key">
+                              {leaf.path.slice(section.id.length + 1).replace(/^output\./, '')}
+                            </span>
+                            <span className={`pill-kind kind-${leaf.kind}`}>{leaf.kind}</span>
+                            {!container && (
+                              <span className="pill-value">{String(leaf.value)}</span>
+                            )}
+                          </button>
+                        </li>
+                      )
+                    })}
+                  </ul>
                 )}
-              </button>
-            </li>
-          ))}
+              </li>
+            )
+          })}
         </ul>
       )}
     </>

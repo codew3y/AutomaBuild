@@ -599,3 +599,29 @@ button.danger.inline { width: auto; margin-top: 0; }
 .dialog-backdrop.beside-panel { right: 22rem; }
 
 .field-locked { color: var(--accent); font-weight: 600; }
+
+/* --------------------------------------------------- mapping by step */
+
+.sources { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .3rem; }
+
+.source-head {
+  display: flex;
+  align-items: baseline;
+  gap: .45rem;
+  width: 100%;
+  text-align: left;
+  font-size: .8rem;
+  padding: .35rem .5rem;
+}
+.source-head[aria-expanded='true'] { border-color: var(--accent); }
+.source-head:disabled { opacity: .55; }
+
+.source-caret { width: .7rem; color: var(--muted); }
+.source-name { font-weight: 600; }
+.source-count { margin-left: auto; font-size: .7rem; }
+
+/* The fields of one step, indented as a group rather than per row — the rows
+   themselves stay flush so their text lines up down the list. */
+.sources .tree { margin: .25rem 0 .5rem 1.15rem; }
+
+.target-note { font-size: .78rem; margin: 0 0 .4rem; }
