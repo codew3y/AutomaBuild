@@ -44,13 +44,31 @@ import { describeRun, relativeTime, sortHistory, type RunListing } from './core/
 import { diffGraph } from './core/patch.ts'
 import { apiFetch, readApiKey, writeApiKey, UnauthorizedError } from './core/api.ts'
 import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
-import { SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
+import { EMPTY_FLOW, SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
 
 const graphStore = createGraphStore({ initial: SAMPLE_FLOW })
 const editorStore = createEditorStore()
 
-const DRAFT_KEY = 'automa-flow-canvas:draft'
+const DRAFT_KEY_BASE = 'automa-flow-canvas:draft'
+
+/**
+ * A draft belongs to one flow.
+ *
+ * A single key meant switching flows handed the second one the first one's
+ * unsaved work, and publishing then wrote it to the wrong flow. The old key is
+ * still read once for a draft saved before flows existed.
+ */
+const draftKeyFor = (flowId: string | null): string =>
+  flowId === null ? DRAFT_KEY_BASE : `${DRAFT_KEY_BASE}:${flowId}`
+
+export interface FlowSummary {
+  readonly flowId: string
+  readonly name: string
+  readonly endpointId: string | null
+  readonly scheme: string | null
+  readonly isDefault: boolean
+}
 
 export interface WebhookInfo {
   readonly url: string
@@ -292,6 +310,34 @@ function Editor() {
   const [webhook, setWebhook] = useState<WebhookInfo | null>(null)
 
   /**
+   * The flows this tenant has, and which one is open.
+   *
+   * `flowId` is null until the list arrives, and every request that needs a
+   * scope waits for it. Guessing the default and correcting later would mean
+   * the editor briefly showed one flow's runs under another's name.
+   */
+  const [flowList, setFlowList] = useState<readonly FlowSummary[]>([])
+  const [flowId, setFlowId] = useState<string | null>(null)
+
+  // The autosave closure is built once and outlives every flow switch, so it
+  // reads the current flow through a ref. Capturing flowId directly would have
+  // it writing this flow's draft under the id of whichever flow was open when
+  // the editor started.
+  const flowRef = useRef<string | null>(null)
+  flowRef.current = flowId
+
+  const autosave = useRef(
+    createAutosave({
+      save: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 180))
+        localStorage.setItem(draftKeyFor(flowRef.current), JSON.stringify(graphStore.getState().snapshot()))
+      },
+      onStateChange: setSaveState,
+    }),
+  ).current
+
+
+  /**
    * Set when the server has refused the key we hold.
    *
    * A banner rather than a modal: the editor still works offline against its
@@ -341,10 +387,10 @@ function Editor() {
     // step log of a run nobody has asked to see yet — except that the viewer
     // does open on the latest one, so here it is worth it exactly once.
     Promise.all([
-      apiFetch('api/runs')
+      apiFetch(`api/runs${scope}`)
         .then((response) => (response.ok ? response.json() : null))
         .catch(() => null),
-      apiFetch('api/runs/latest')
+      apiFetch(`api/runs/latest${scope}`)
         .then((response) => (response.ok ? response.json() : null))
         .catch(() => null),
     ])
@@ -376,9 +422,36 @@ function Editor() {
     }
   }, [])
 
+  /** Everything scoped to a flow carries this. */
+  const scope = flowId === null ? '' : `?flow=${encodeURIComponent(flowId)}`
+
+  const loadFlows = useCallback((select?: string) => {
+    apiFetch('api/flows')
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: FlowSummary[] | null) => {
+        if (!Array.isArray(data) || data.length === 0) return
+        setFlowList(data)
+        setFlowId((current) => {
+          if (select !== undefined) return select
+          // Keep the open flow across a refresh of the list; otherwise open the
+          // default, and fall back to the first if there is no default.
+          if (current !== null && data.some((flow) => flow.flowId === current)) return current
+          return (data.find((flow) => flow.isDefault) ?? data[0]!).flowId
+        })
+      })
+      .catch((error: unknown) => {
+        if (error instanceof UnauthorizedError) setNeedsKey(true)
+      })
+  }, [])
+
   useEffect(() => {
+    loadFlows()
+  }, [loadFlows])
+
+  useEffect(() => {
+    if (flowId === null) return
     let cancelled = false
-    apiFetch('api/webhook')
+    apiFetch(`api/webhook${scope}`)
       .then((response) => (response.ok ? response.json() : null))
       .then((data: WebhookInfo | null) => {
         if (cancelled || data === null || typeof data.url !== 'string') return
@@ -393,16 +466,32 @@ function Editor() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [flowId, scope])
 
   // What is live, fetched once. A 404 means nothing has been published yet,
   // which is a state rather than an error.
   useEffect(() => {
+    if (flowId === null) return
     let cancelled = false
-    apiFetch('api/flows/published')
+
+    // A flow with nothing published yet has no graph to show, and the previous
+    // flow's must not be left on screen pretending to be this one's.
+    setPublished(null)
+
+    apiFetch(`api/flows/published${scope}`)
       .then((response) => (response.ok ? response.json() : null))
       .then((data: { versionId: string; graph: FlowGraph } | null) => {
-        if (cancelled || data === null || !Array.isArray(data.graph?.nodes)) return
+        if (cancelled) return
+        if (data === null || !Array.isArray(data.graph?.nodes)) {
+          // Nothing published. Start from an empty canvas rather than the last
+          // flow's steps, which would look like this flow already had them.
+          if (localStorage.getItem(draftKeyFor(flowId)) === null) {
+            graphStore.getState().replaceGraph(EMPTY_FLOW)
+            graphStore.temporal.getState().clear()
+            autosave.reset(EMPTY_FLOW)
+          }
+          return
+        }
         setPublished({ versionId: data.versionId, graph: data.graph })
 
         // Open on what is live, unless there is unsaved local work.
@@ -414,7 +503,7 @@ function Editor() {
         // no way to notice. A local draft still wins, because it is unsaved
         // work and losing it silently would be worse; the divergence indicator
         // and Discard are what surface the difference in that case.
-        if (localStorage.getItem(DRAFT_KEY) === null) {
+        if (localStorage.getItem(draftKeyFor(flowId)) === null) {
           graphStore.getState().replaceGraph(data.graph)
           graphStore.temporal.getState().clear()
           autosave.reset(data.graph)
@@ -426,7 +515,7 @@ function Editor() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [flowId, scope, autosave])
 
   /**
    * Has the draft moved away from what is live?
@@ -447,7 +536,7 @@ function Editor() {
     setPublishError(null)
     const snapshot = graphStore.getState().snapshot()
 
-    apiFetch('api/flows/published', {
+    apiFetch(`api/flows/published${scope}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ graph: snapshot }),
@@ -500,7 +589,7 @@ function Editor() {
     (id: string) => {
       if (id === run.id) return
       setLoadingRun(true)
-      apiFetch(`api/runs/${encodeURIComponent(id)}`)
+      apiFetch(`api/runs/${encodeURIComponent(id)}${scope}`)
         .then((response) => (response.ok ? response.json() : null))
         .then((data: RunRecord | null) => {
           if (data === null || !Array.isArray(data.steps)) return
@@ -541,18 +630,9 @@ function Editor() {
   const runSummary = useMemo(() => summarise(run), [run])
   const viewing = mode === 'run'
 
-  const autosave = useRef(
-    createAutosave({
-      save: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 180))
-        localStorage.setItem(DRAFT_KEY, JSON.stringify(graphStore.getState().snapshot()))
-      },
-      onStateChange: setSaveState,
-    }),
-  ).current
 
   useEffect(() => {
-    const saved = localStorage.getItem(DRAFT_KEY)
+    const saved = localStorage.getItem(draftKeyFor(flowRef.current))
     if (saved !== null) {
       try {
         const parsed = JSON.parse(saved) as FlowGraph
@@ -561,7 +641,7 @@ function Editor() {
         graphStore.temporal.getState().clear()
         setRestored(true)
       } catch {
-        localStorage.removeItem(DRAFT_KEY)
+        localStorage.removeItem(draftKeyFor(flowRef.current))
       }
     } else {
       autosave.reset(graphStore.getState().snapshot())
@@ -801,6 +881,52 @@ function Editor() {
         </button>
 
         <strong className="brand">Automabuild</strong>
+
+        {/*
+          Which flow is open. Only shown when a server is answering — without
+          one there is a single local draft and nothing to switch between, and
+          a picker with one permanent entry is furniture.
+        */}
+        {flowList.length > 0 && (
+          <select
+            className="flow-picker"
+            value={flowId ?? ''}
+            onChange={(event) => {
+              const chosen = event.target.value
+              if (chosen === '__new__') {
+                const name = window.prompt('Name the new flow')
+                if (name === null || name.trim() === '') return
+                apiFetch('api/flows', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ name: name.trim() }),
+                })
+                  .then(async (response) => {
+                    const created = (await response.json()) as { flowId?: string; error?: string }
+                    if (!response.ok) throw new Error(created.error ?? 'could not create the flow')
+                    // Open it immediately: creating a flow and then having to
+                    // find it in the list is a step nobody wants.
+                    loadFlows(created.flowId)
+                  })
+                  .catch((error: unknown) => {
+                    setPublishError(error instanceof Error ? error.message : String(error))
+                  })
+                return
+              }
+              editorStore.getState().select(null)
+              setSetupOpen(false)
+              setFlowId(chosen)
+            }}
+            title="Which flow you are editing"
+          >
+            {flowList.map((flow) => (
+              <option key={flow.flowId} value={flow.flowId}>
+                {flow.name}
+              </option>
+            ))}
+            <option value="__new__">+ New flow…</option>
+          </select>
+        )}
 
         <div className="modes">
           <button

@@ -654,3 +654,17 @@ button.danger.inline { width: auto; margin-top: 0; }
   .dialog-body.split { grid-template-columns: minmax(0, 1fr); }
   .split-right { border-left: none; border-top: 1px solid var(--line); }
 }
+
+/* The flow picker sits with the brand, because which flow is open is closer to
+   "where am I" than to "what can I do here". */
+.flow-picker {
+  font: inherit;
+  font-size: .85rem;
+  font-weight: 600;
+  padding: .25rem .4rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--bg);
+  color: var(--fg);
+  max-width: 14rem;
+}

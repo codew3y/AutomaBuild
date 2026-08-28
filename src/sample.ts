@@ -52,6 +52,25 @@ export const SCHEMAS: Record<string, StepSchema> = {
 }
 
 /**
+ * What a brand-new flow starts as.
+ *
+ * A trigger and nothing else. Not an empty canvas: every flow must begin at a
+ * trigger, so an empty one would fail to compile the moment someone pressed
+ * Publish, and the first thing a new flow did would be to refuse itself.
+ */
+export const EMPTY_FLOW: FlowGraph = {
+  nodes: [
+    {
+      id: 'trigger',
+      kind: 'trigger',
+      position: { x: 80, y: 160 },
+      data: { label: 'Webhook received' },
+    },
+  ],
+  edges: [],
+}
+
+/**
  * A flow that publishes and runs, straight out of the box.
  *
  * Every step kind that has an executor, in the order they make sense: the
