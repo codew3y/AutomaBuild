@@ -1094,6 +1094,15 @@ button.danger.inline { width: auto; margin-top: 0; }
 */
 .append-hint {
   position: absolute;
+  /*
+    React Flow's viewport is pointer-events: none, and every node inside it
+    turns them back on for itself. A portal into that viewport inherits the
+    none — so the hint never saw the dragover or the drop, the pane underneath
+    handled them instead, and a step dropped on the hint appeared at the cursor
+    with no edge. It looked like connecting was broken; nothing was ever
+    dropped on the hint at all.
+  */
+  pointer-events: all;
   left: var(--x);
   top: var(--y);
   width: var(--w);
