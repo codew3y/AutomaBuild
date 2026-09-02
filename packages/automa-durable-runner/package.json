@@ -1,0 +1,69 @@
+{
+  "name": "automa-durable-runner",
+  "version": "0.0.0",
+  "description": "A multi-step task engine that does not lose work when a machine dies, and does not repeat work it has already done.",
+  "license": "MIT",
+  "author": "Wey Tongol",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codew3y/automa-durable-runner.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit && node scripts/check-control-chars.mjs",
+    "test": "node --test --test-concurrency=1 \"test/*.test.ts\"",
+    "test:watch": "node --test --watch \"test/*.test.ts\"",
+    "coverage": "node --test --test-concurrency=1 --experimental-test-coverage \"test/*.test.ts\"",
+    "db:migrate": "node scripts/migrate.ts",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && docker compose up -d",
+    "demo:chaos": "node scripts/demo-chaos.ts",
+    "cli": "node src/cli.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "lint": "node scripts/check-control-chars.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.23.1",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "automa-safe-fetch": "^0.1.1",
+    "pg": "^8.23.0"
+  },
+  "bin": {
+    "automa-runner": "src/cli.ts"
+  },
+  "keywords": [
+    "durable-execution",
+    "workflow",
+    "postgres",
+    "outbox",
+    "idempotency",
+    "saga",
+    "job-queue",
+    "chaos-testing"
+  ],
+  "homepage": "https://github.com/codew3y/automa-durable-runner#readme",
+  "bugs": {
+    "url": "https://github.com/codew3y/automa-durable-runner/issues"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "migrations",
+    "README.md",
+    "LICENSE"
+  ]
+}

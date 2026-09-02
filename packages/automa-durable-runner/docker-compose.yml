@@ -1,0 +1,70 @@
+# The development stack: one command from a clean clone.
+#
+#   docker compose up -d
+#
+# Postgres is the source of truth for every run and every step. Redis carries
+# queue pointers and rate-limit buckets and is deliberately disposable — the
+# invariant this engine has to hold is that you can flush Redis at any moment
+# and lose latency, not data. There is an integration test for exactly that,
+# so treat the volume below as a convenience, never as state that matters.
+
+name: automa-durable-runner
+
+services:
+  postgres:
+    build:
+      context: ./docker/postgres
+    environment:
+      POSTGRES_DB: automa
+      POSTGRES_USER: automa
+      POSTGRES_PASSWORD: automa
+      # Local development only. Nothing here is a secret, and nothing here
+      # should ever be reachable from outside this machine.
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    ports:
+      - '54329:5432'
+    volumes:
+      # Postgres 18 images store data in a major-version subdirectory, so the
+      # mount belongs at /var/lib/postgresql, not .../data as it did through
+      # 17. Mounting the old path makes the container refuse to start.
+      - postgres-data:/var/lib/postgresql
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    command:
+      - postgres
+      # The engine polls the outbox and claims leases; both are short
+      # transactions at high frequency. Logging anything slower than 200ms
+      # makes a stall visible rather than mysterious.
+      - -c
+      - log_min_duration_statement=200
+      - -c
+      - max_connections=100
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U automa -d automa']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    ports:
+      - '63799:6379'
+    command:
+      - redis-server
+      # No persistence. Losing Redis must be survivable by design, and a dev
+      # stack that quietly restores state from disk would hide the bug where
+      # it is not.
+      - --save
+      - ''
+      - --appendonly
+      - 'no'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

@@ -1,0 +1,7 @@
+{
+  "nodes": [
+    { "id": "first",  "kind": "noop", "idempotent": true, "config": { "output": "hello" } },
+    { "id": "second", "kind": "noop", "idempotent": true },
+    { "id": "third",  "kind": "noop", "idempotent": true }
+  ]
+}
