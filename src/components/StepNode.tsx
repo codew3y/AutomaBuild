@@ -30,22 +30,27 @@ export interface StepNodeData extends Record<string, unknown> {
   readonly durationMs?: number
 }
 
-/** The single place node colours are defined, so the glyph map below and
- *  anything else that needs one agree. */
+/**
+ * Node colours, as references into the stylesheet rather than literals.
+ *
+ * A hex here cannot follow the theme: the same violet that reads well on white
+ * is muddy on a near-black canvas, so hard-coding one means every tile is
+ * wrong in one of the two modes. The tokens are defined per theme in app.css.
+ */
 export const KIND_ACCENT: Record<string, string> = {
-  trigger: '#7c3aed',
-  http: '#0ea5e9',
-  transform: '#f59e0b',
-  branch: '#10b981',
-  email: '#ec4899',
+  trigger: 'var(--kind-trigger)',
+  http: 'var(--kind-http)',
+  transform: 'var(--kind-transform)',
+  branch: 'var(--kind-branch)',
+  email: 'var(--kind-email)',
 }
 
 const KIND_STYLE: Record<string, { accent: string; glyph: string }> = {
-  trigger: { accent: '#7c3aed', glyph: '▶' },
-  http: { accent: '#0ea5e9', glyph: '↗' },
-  transform: { accent: '#f59e0b', glyph: 'ƒ' },
-  branch: { accent: '#10b981', glyph: '⑂' },
-  email: { accent: '#ec4899', glyph: '✉' },
+  trigger: { accent: 'var(--kind-trigger)', glyph: '▶' },
+  http: { accent: 'var(--kind-http)', glyph: '↗' },
+  transform: { accent: 'var(--kind-transform)', glyph: 'ƒ' },
+  branch: { accent: 'var(--kind-branch)', glyph: '⑂' },
+  email: { accent: 'var(--kind-email)', glyph: '✉' },
 }
 
 /** One problem per line in the tooltip. */
@@ -53,7 +58,7 @@ const NEWLINE = String.fromCharCode(10)
 
 function StepNodeComponent({ data, selected, id }: NodeProps) {
   const stepData = data as StepNodeData
-  const style = KIND_STYLE[stepData.kind] ?? { accent: '#64748b', glyph: '•' }
+  const style = KIND_STYLE[stepData.kind] ?? { accent: 'var(--muted)', glyph: '•' }
   const isTrigger = stepData.kind === 'trigger'
   const isBranch = stepData.kind === 'branch'
 
