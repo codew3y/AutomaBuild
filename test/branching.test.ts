@@ -171,3 +171,124 @@ describe('the condition language', () => {
     assert.equal(value('1 = 1; process.exit(1)'), false)
   })
 })
+
+describe('the word operators', () => {
+  const yes = (condition: string) => {
+    const result = evaluateCondition(condition)
+    assert.equal(result.ok, true, `${condition} did not evaluate`)
+    assert.equal(result.ok && result.value, true, `${condition} was false`)
+  }
+
+  const no = (condition: string) => {
+    const result = evaluateCondition(condition)
+    assert.equal(result.ok, true, `${condition} did not evaluate`)
+    assert.equal(result.ok && result.value, false, `${condition} was true`)
+  }
+
+  it('asks about text, which arithmetic could not', () => {
+    yes('Order confirmed contains confirm')
+    no('Order confirmed contains refund')
+    yes('ada@example.com ends with @example.com')
+    no('ada@example.com ends with @other.com')
+    yes('INV-2024-01 starts with INV-')
+    no('INV-2024-01 starts with PO-')
+  })
+
+  it('is case-insensitive, because that is what asking about text means', () => {
+    yes('Order Confirmed CONTAINS confirmed')
+    yes('ADA@EXAMPLE.COM ends with @example.com')
+  })
+
+  it('negates without reading as its own opposite', () => {
+    // `does not contain` has to be found before `contains`, or the parser
+    // matches the tail of the phrase and inverts the answer.
+    no('Order confirmed does not contain confirm')
+    yes('Order confirmed does not contain refund')
+    yes('ada@example.com does not end with @other.com')
+    yes('INV-1 does not start with PO-')
+  })
+
+  it('tests membership against a list', () => {
+    yes('GB is in GB, IE, FR')
+    yes('gb is in GB, IE, FR')
+    no('US is in GB, IE, FR')
+    yes('US is not in GB, IE, FR')
+    // `is not in` before `is in`, same reason as the negations above.
+    no('GB is not in GB, IE, FR')
+  })
+
+  it('answers whether a field is there at all', () => {
+    yes('ada@example.com exists')
+    no(' exists')
+    no('"" exists')
+    yes('"" does not exist')
+
+    // The one case worth being careful about. An unresolved reference reaches
+    // the evaluator as its own literal text, so that a broken mapping stays
+    // visible everywhere else. `exists` is the one place that has to read it
+    // as absence instead.
+    no('{{ steps.lookup.output.email }} exists')
+    yes('{{ steps.lookup.output.email }} does not exist')
+  })
+
+  it('refuses a value after an operator that takes none', () => {
+    const result = evaluateCondition('email exists something')
+    assert.equal(result.ok, false)
+    assert.match(result.ok ? '' : result.reason, /takes nothing after it/)
+  })
+
+  it('does not mistake a word inside a value for an operator', () => {
+    // "containsulfates" contains "contains", but not as a word.
+    yes('containsulfates = containsulfates')
+  })
+})
+
+describe('joining conditions', () => {
+  const value = (condition: string) => {
+    const result = evaluateCondition(condition)
+    assert.equal(result.ok, true, `${condition} did not evaluate`)
+    return result.ok && result.value
+  }
+
+  it('joins with and', () => {
+    assert.equal(value('premium = premium and 100 >= 50'), true)
+    assert.equal(value('premium = premium and 10 >= 50'), false)
+    assert.equal(value('basic = premium and 100 >= 50'), false)
+  })
+
+  it('joins with or', () => {
+    assert.equal(value('basic = premium or 100 >= 50'), true)
+    assert.equal(value('basic = premium or 10 >= 50'), false)
+  })
+
+  it('binds and tighter than or, as every language with both does', () => {
+    // Read as `false or (true and true)`. Splitting on `and` first would give
+    // `(false or true) and true`, which is the same here — so the case that
+    // actually distinguishes them:
+    //   false and false or true  ->  (false and false) or true  ->  true
+    assert.equal(value('a = b and c = d or e = e'), true)
+    //   true or false and false  ->  true or (false and false) ->  true
+    assert.equal(value('e = e or a = b and c = d'), true)
+    //   true and false or false  ->  (true and false) or false ->  false
+    assert.equal(value('e = e and a = b or c = d'), false)
+  })
+
+  it('does not split a join word out of a quoted value', () => {
+    // Two comparisons would be `subject contains "fish` and `chips"`, and the
+    // first of those is a different question with a different answer.
+    assert.equal(value('"fish and chips" contains "and"'), true)
+    assert.equal(value('"fish and chips" = "fish and chips"'), true)
+  })
+
+  it('fails the whole condition when one part cannot be read', () => {
+    // Not "false". A typo that silently makes a branch always go one way is
+    // the failure mode this exists to prevent.
+    const result = evaluateCondition('premium = premium and abc > def')
+    assert.equal(result.ok, false)
+  })
+
+  it('combines words and symbols', () => {
+    assert.equal(value('ada@example.com ends with @example.com and 100 >= 50'), true)
+    assert.equal(value('GB is in GB, IE and tier = tier'), true)
+  })
+})

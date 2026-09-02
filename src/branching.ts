@@ -81,11 +81,38 @@ export function stepsToSkip(
 }
 
 /**
- * The condition language, which is deliberately tiny.
+ * The condition language, which is deliberately small.
  *
- * `left op right`, where either side may be a literal and the references have
- * already been substituted by the time this sees them. Supported operators are
- * `=`, `!=`, `>`, `<`, `>=`, `<=`, plus a bare value tested for truthiness.
+ * A condition is a set of comparisons joined by `and` and `or`:
+ *
+ *     tier = premium and country is in GB, IE, FR
+ *     total >= 100 or flags.vip exists
+ *
+ * Each comparison is `left op right`, where either side may be a literal and
+ * the references have already been substituted by the time this sees them. A
+ * bare value with no operator is tested for truthiness.
+ *
+ * Symbol operators: `=`, `!=`, `>`, `<`, `>=`, `<=`.
+ *
+ * Word operators, which is what the earlier six were missing. Real conditions
+ * are mostly about text — a subject line containing a word, an address ending
+ * in a domain, a field being present at all — and none of that can be said
+ * with arithmetic. The vocabulary follows Zapier's, because it is the one
+ * anyone arriving here will already have in their head:
+ *
+ *     contains / does not contain
+ *     starts with / does not start with
+ *     ends with / does not end with
+ *     is in / is not in          (right side is a comma-separated list)
+ *     exists / does not exist    (no right side)
+ *
+ * Comparison is case-insensitive for the word operators and exact for `=`,
+ * which matches where people's expectations actually sit: `contains` is being
+ * asked as a question about meaning, `=` as a question about identity.
+ *
+ * `and` binds tighter than `or`, as in every language that has both. There is
+ * no bracketing — a condition needing brackets has outgrown a single text
+ * field, and the honest answer is a second branch rather than a parser.
  *
  * Not an expression language, and not `eval`. A workflow engine that runs
  * user-supplied code needs a sandbox, and a sandbox is a much larger thing to
@@ -96,6 +123,153 @@ export function stepsToSkip(
 export type ConditionResult = { readonly ok: true; readonly value: boolean } | { readonly ok: false; readonly reason: string }
 
 const OPERATORS = ['>=', '<=', '!=', '=', '>', '<'] as const
+
+/**
+ * Word operators, longest phrase first.
+ *
+ * Order is load-bearing twice over. `does not contain` must be tried before
+ * `contains`, or the negation is read as its own opposite. And `is not in`
+ * before `is in`, for the same reason.
+ *
+ * Each is matched as a whole word with spaces around it, so a value of
+ * "containsulfates" is a value and not an operator.
+ */
+const WORD_OPERATORS = [
+  'does not start with',
+  'does not contain',
+  'does not end with',
+  'does not exist',
+  'is not in',
+  'starts with',
+  'ends with',
+  'contains',
+  'is in',
+  'exists',
+] as const
+
+type WordOperator = (typeof WORD_OPERATORS)[number]
+
+/** Operators taking no right-hand side. */
+const UNARY: readonly string[] = ['exists', 'does not exist']
+
+/** Case-insensitive, because that is what someone asking about text means. */
+function fold(value: string): string {
+  return unquote(value).toLowerCase()
+}
+
+/** `GB, IE, FR` — the right side of `is in`. Empty entries are dropped. */
+function splitList(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((entry) => fold(entry))
+    .filter((entry) => entry !== '')
+}
+
+const UNRESOLVED = /^\s*\{\{[^}]*\}\}\s*$/
+
+/**
+ * Whether a value is actually there, as `exists` means it.
+ *
+ * An unresolved reference arrives here as the literal `{{ ... }}` text rather
+ * than as nothing — that is deliberate elsewhere, so a broken mapping stays
+ * visible. Here it has to read as absence, or `exists` answers yes about a
+ * field that is not there.
+ */
+function present(raw: string): boolean {
+  const trimmed = unquote(raw)
+  if (trimmed === '') return false
+  if (UNRESOLVED.test(trimmed)) return false
+  return trimmed !== 'null' && trimmed !== 'undefined'
+}
+
+function applyWord(op: WordOperator, leftRaw: string, rightRaw: string): ConditionResult {
+  const left = fold(leftRaw)
+  const right = fold(rightRaw)
+
+  switch (op) {
+    case 'contains':
+      return { ok: true, value: left.includes(right) }
+    case 'does not contain':
+      return { ok: true, value: !left.includes(right) }
+    case 'starts with':
+      return { ok: true, value: left.startsWith(right) }
+    case 'does not start with':
+      return { ok: true, value: !left.startsWith(right) }
+    case 'ends with':
+      return { ok: true, value: left.endsWith(right) }
+    case 'does not end with':
+      return { ok: true, value: !left.endsWith(right) }
+    case 'is in':
+      return { ok: true, value: splitList(rightRaw).includes(left) }
+    case 'is not in':
+      return { ok: true, value: !splitList(rightRaw).includes(left) }
+    case 'exists':
+      return { ok: true, value: present(leftRaw) }
+    case 'does not exist':
+      return { ok: true, value: !present(leftRaw) }
+  }
+}
+
+/**
+ * Find a word operator in a comparison.
+ *
+ * Matched against a lower-cased copy so `Contains` works, but the operands are
+ * sliced out of the original — lower-casing the value someone is comparing
+ * against would be a surprising thing for the parser to do on their behalf.
+ *
+ * The returned offset is into the original string: the haystack is padded with
+ * one leading space, and the match includes the operator's own leading space,
+ * so the two cancel.
+ */
+function findWordOperator(source: string): { op: WordOperator; at: number } | null {
+  const haystack = ' ' + source.toLowerCase() + ' '
+  for (const op of WORD_OPERATORS) {
+    const at = haystack.indexOf(' ' + op + ' ')
+    if (at !== -1) return { op, at }
+  }
+  return null
+}
+
+/**
+ * Split on a joining word, at the top level.
+ *
+ * `and` and `or` are ordinary words, so the split has to skip any that fall
+ * inside quotes — `subject contains "fish and chips"` is one comparison, not
+ * two. Nothing else nests, which is why tracking the quote character is enough
+ * and a real tokeniser is not.
+ *
+ * Returns null when the word does not appear, so the caller can tell "one
+ * comparison" from "a join with one empty side".
+ */
+function splitJoined(source: string, word: 'and' | 'or'): string[] | null {
+  const needle = ' ' + word + ' '
+  const lower = source.toLowerCase()
+  const parts: string[] = []
+
+  let start = 0
+  let quote: string | null = null
+
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]!
+    if (quote !== null) {
+      if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (lower.startsWith(needle, i)) {
+      parts.push(source.slice(start, i))
+      i += needle.length - 1
+      start = i + 1
+    }
+  }
+
+  if (parts.length === 0) return null
+  parts.push(source.slice(start))
+  return parts
+}
 
 /** Strip one layer of matching quotes, so `"premium"` compares as `premium`. */
 function unquote(raw: string): string {
@@ -118,6 +292,50 @@ function truthy(raw: string): boolean {
 export function evaluateCondition(condition: string): ConditionResult {
   const source = condition.trim()
   if (source === '') return { ok: false, reason: 'the condition is empty' }
+
+  // `or` is split first so it ends up outermost, and therefore binds loosest.
+  const alternatives = splitJoined(source, 'or')
+  if (alternatives !== null) {
+    let value = false
+    for (const part of alternatives) {
+      const result = evaluateCondition(part)
+      // A broken sub-condition fails the whole thing rather than counting as
+      // false. "The condition was not met" and "the condition could not be
+      // read" are different answers, and collapsing them hides a typo behind a
+      // branch that quietly always goes the same way.
+      if (!result.ok) return result
+      if (result.value) value = true
+    }
+    return { ok: true, value }
+  }
+
+  const conjuncts = splitJoined(source, 'and')
+  if (conjuncts !== null) {
+    let value = true
+    for (const part of conjuncts) {
+      const result = evaluateCondition(part)
+      if (!result.ok) return result
+      if (!result.value) value = false
+    }
+    return { ok: true, value }
+  }
+
+  // Word operators before symbols. The two never compete for the same text —
+  // `country is in GB, IE` holds no symbol, `a >= b` holds no word — but the
+  // order still has to be fixed, and words first means a quoted value
+  // containing `>` is not mistaken for a comparison.
+  const word = findWordOperator(source)
+  if (word !== null) {
+    const left = source.slice(0, word.at)
+    const right = source.slice(word.at + word.op.length + 1)
+    if (UNARY.includes(word.op) && right.trim() !== '') {
+      return {
+        ok: false,
+        reason: word.op + ' takes nothing after it, but found ' + JSON.stringify(right.trim()),
+      }
+    }
+    return applyWord(word.op, left, right)
+  }
 
   for (const op of OPERATORS) {
     // `=` must not match the `=` inside `>=`, which is why the operator list
