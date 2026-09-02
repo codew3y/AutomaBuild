@@ -1,0 +1,72 @@
+# Publishes to npm on a pushed tag, via trusted publishing (OIDC).
+#
+# There is no npm token. GitHub mints a short-lived OIDC token that npm
+# verifies against the trusted publisher configured on the package — this
+# repository, this workflow filename. Nothing long-lived exists to leak, expire,
+# or rotate.
+#
+# npm is retiring token-based publishing in January 2027, so this is also the
+# path that keeps working.
+#
+# Provenance is signed from the same identity, linking the published tarball to
+# this workflow run and this commit.
+#
+# Requires: `id-token: write`, npm >= 11.5.1 (Node 24 ships 11.x), and a trusted
+# publisher registered at npmjs.com for codew3y/automa-safe-fetch → release.yml.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Fail before anything is published if the tag and the manifest disagree.
+      # Tagging v0.2.0 against version 0.1.0 would otherwise quietly republish
+      # 0.1.0, and npm unpublishing is a 72-hour window at best.
+      - name: Check the tag matches package.json
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG}"
+            exit 1
+          fi
+          echo "Publishing version ${PKG}"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # setup-node always writes `_authToken=${NODE_AUTH_TOKEN}` into .npmrc
+      # when registry-url is set. With no token in the environment that expands
+      # to an empty credential; npm then decides authentication is already
+      # configured, never attempts the OIDC exchange, and fails with a
+      # misleading 404. Deleting the line is what lets OIDC engage.
+      # https://github.com/actions/setup-node/issues/1551
+      - name: Drop the empty token line that suppresses OIDC
+        run: |
+          NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          if [ -f "$NPMRC" ] && grep -q '_authToken' "$NPMRC"; then
+            sed -i '/_authToken/d' "$NPMRC"
+            echo "Removed _authToken line from ${NPMRC}"
+          else
+            echo "No _authToken line present in ${NPMRC:-<none>}"
+          fi
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      # No NODE_AUTH_TOKEN. Authentication is the OIDC token above.
+      - run: npm publish --provenance --access public

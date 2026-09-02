@@ -1,0 +1,502 @@
+/**
+ * Step 5 and 6: connect to the address we validated, and revalidate on every
+ * redirect hop.
+ *
+ * The pin is the whole library. Everything above this file is a deny-list,
+ * and deny-lists are bypass-prone. What makes this more than decorative is
+ * that the address the HTTP stack connects to is the exact address that was
+ * checked — the stack is never given the opportunity to resolve the name a
+ * second time and get a different answer.
+ */
+
+import http from 'node:http'
+import https from 'node:https'
+import type { LookupAddress } from 'node:dns'
+import {
+  ResponseTooLargeError,
+  SafeFetchTimeoutError,
+  SsrfBlockedError,
+  TooManyRedirectsError,
+} from './errors.ts'
+import { type Blocklist, type BlocklistOptions, createBlocklist } from './blocklist.ts'
+import {
+  type AddressResolver,
+  type ResolvedAddress,
+  createDefaultResolver,
+  resolveAndValidate,
+} from './resolve.ts'
+import { DEFAULT_URL_POLICY, type UrlPolicy, validateUrl } from './url.ts'
+
+export interface SafeFetchOptions extends BlocklistOptions {
+  /**
+   * Redirect hops permitted. Default 0 — a redirect is a fresh, attacker-chosen
+   * URL, and the safe default is not to follow it.
+   */
+  maxRedirects?: number
+  /** Streaming cap on the response body. Default 10 MiB. */
+  maxResponseBytes?: number
+  /** Whole-request deadline, including redirects. Default 30_000 ms. */
+  timeoutMs?: number
+  allowedPorts?: readonly number[]
+  /** DNS servers for the internal resolver. Defaults to the system's. */
+  dnsServers?: readonly string[]
+  /** Injectable resolver, primarily so the test suite can drive DNS. */
+  resolver?: AddressResolver
+  /** Called once per connection with the address actually connected to. */
+  onConnect?: (info: ConnectionInfo) => void
+}
+
+export interface ConnectionInfo {
+  readonly url: string
+  readonly hostname: string
+  readonly port: number
+  readonly resolvedIp: string
+  readonly family: 4 | 6
+  readonly hop: number
+  /** Every address the name resolved to, all of which passed validation. */
+  readonly allResolved: readonly string[]
+}
+
+export interface SafeFetchRequestInit {
+  method?: string
+  headers?: Record<string, string> | Headers
+  body?: string | Uint8Array | null
+  signal?: AbortSignal
+  /** Per-request override of the instance default. */
+  maxRedirects?: number
+  maxResponseBytes?: number
+  timeoutMs?: number
+}
+
+export type SafeFetch = (
+  input: string | URL,
+  init?: SafeFetchRequestInit,
+) => Promise<Response>
+
+const DEFAULT_USER_AGENT = 'automa-safe-fetch (+https://github.com/codew3y/automa-safe-fetch)'
+const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+const DEFAULT_TIMEOUT_MS = 30_000
+
+/** Connection details for a response, for the audit log. */
+const connectionInfo = new WeakMap<Response, ConnectionInfo>()
+
+/**
+ * What address did this response actually come from?
+ *
+ * Layer 4 of the plan's defence in depth is detection, and detection needs the
+ * resolved IP of every outbound request. Log this.
+ */
+export function getConnectionInfo(response: Response): ConnectionInfo | undefined {
+  return connectionInfo.get(response)
+}
+
+export function createSafeFetch(options: SafeFetchOptions = {}): SafeFetch {
+  const list: Blocklist = createBlocklist(options)
+  const policy: UrlPolicy = {
+    ...DEFAULT_URL_POLICY,
+    ...(options.allowedPorts === undefined ? {} : { allowedPorts: options.allowedPorts }),
+  }
+  const resolver =
+    options.resolver ?? createDefaultResolver(options.dnsServers)
+
+  const defaults = {
+    maxRedirects: options.maxRedirects ?? 0,
+    maxResponseBytes: options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  }
+
+  return async function safeFetch(input, init = {}) {
+    const maxRedirects = init.maxRedirects ?? defaults.maxRedirects
+    const maxResponseBytes = init.maxResponseBytes ?? defaults.maxResponseBytes
+    const timeoutMs = init.timeoutMs ?? defaults.timeoutMs
+    const deadline = Date.now() + timeoutMs
+
+    let currentUrl = typeof input === 'string' ? input : input.href
+    let method = (init.method ?? 'GET').toUpperCase()
+    let body = init.body ?? null
+    let headers = normaliseHeaders(init.headers)
+    const origin = safeOrigin(currentUrl)
+
+    for (let hop = 0; ; hop++) {
+      if (hop > maxRedirects) {
+        throw new TooManyRedirectsError(maxRedirects, currentUrl)
+      }
+
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) throw new SafeFetchTimeoutError(timeoutMs, currentUrl)
+
+      // 1-2: shape, encodings, literal addresses. 3-4: resolve and validate all.
+      const validated = validateUrl(currentUrl, list, policy, hop)
+      const addresses: ResolvedAddress[] =
+        validated.literalAddress === null
+          ? await resolveAndValidate(validated.hostname, list, resolver, {
+              url: currentUrl,
+              hop,
+            })
+          : [
+              {
+                text: validated.literalAddress.text,
+                bytes: validated.literalAddress.bytes,
+                family: validated.literalAddress.text.includes(':') ? 6 : 4,
+              },
+            ]
+
+      const pinned = addresses[0]!
+      const info: ConnectionInfo = {
+        url: validated.url.href,
+        hostname: validated.hostname,
+        port: validated.port,
+        resolvedIp: pinned.text,
+        family: pinned.family,
+        hop,
+        allResolved: addresses.map((a) => a.text),
+      }
+      options.onConnect?.(info)
+
+      // 5: connect to that address and no other.
+      const result = await performRequest({
+        url: validated.url,
+        method,
+        headers,
+        body,
+        pinned,
+        hostname: validated.hostname,
+        timeoutMs: Math.max(1, deadline - Date.now()),
+        totalTimeoutMs: timeoutMs,
+        maxResponseBytes,
+        signal: init.signal,
+      })
+
+      if (!isRedirect(result.status) || result.location === undefined) {
+        const response = buildResponse(result, maxResponseBytes)
+        connectionInfo.set(response, info)
+        return response
+      }
+
+      // 6: a redirect is a new URL chosen by the server. Start over.
+      result.discard()
+
+      // Resolve relative Locations, but hand an absolute one to the next
+      // round *verbatim*. Passing it through `new URL()` first would normalise
+      // `http://0x7f000001/` into `http://127.0.0.1/` — still blocked, but the
+      // encoding trick would no longer appear in the error, and that is what
+      // tells you the redirect was an attack rather than a misconfiguration.
+      const isAbsolute = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(result.location)
+      const next = isAbsolute
+        ? result.location
+        : new URL(result.location, validated.url).href
+      if (hop + 1 > maxRedirects) {
+        throw new TooManyRedirectsError(maxRedirects, next)
+      }
+
+      // Never carry credentials across an origin boundary the server picked.
+      // A target we cannot even parse is certainly not the same origin.
+      if (safeOrigin(next) !== origin) {
+        headers = stripSensitiveHeaders(headers)
+      }
+      if (result.status === 303 || ((result.status === 301 || result.status === 302) && method === 'POST')) {
+        method = 'GET'
+        body = null
+        delete headers['content-type']
+        delete headers['content-length']
+      }
+      currentUrl = next
+    }
+  }
+}
+
+/** The origin of a URL, or a value that matches nothing if it will not parse. */
+function safeOrigin(url: string): string {
+  try {
+    return new URL(url).origin
+  } catch {
+    return 'unparseable:'
+  }
+}
+
+function isRedirect(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
+}
+
+function normaliseHeaders(input: SafeFetchRequestInit['headers']): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (input === undefined) return out
+  if (input instanceof Headers) {
+    input.forEach((value, key) => {
+      out[key.toLowerCase()] = value
+    })
+    return out
+  }
+  for (const [key, value] of Object.entries(input)) out[key.toLowerCase()] = value
+  return out
+}
+
+function stripSensitiveHeaders(headers: Record<string, string>): Record<string, string> {
+  const out = { ...headers }
+  delete out.authorization
+  delete out.cookie
+  delete out['proxy-authorization']
+  return out
+}
+
+/**
+ * Why a request was torn down.
+ *
+ * Destroying a request whose response has already started makes the *stream*
+ * emit a bare `Error: aborted`, losing the reason. We record the real cause
+ * here so the body stream can report the timeout or abort that actually
+ * happened rather than a generic socket error.
+ */
+interface AbortState {
+  cause: Error | null
+  clearDeadline: () => void
+}
+
+interface RawResult {
+  status: number
+  statusText: string
+  headers: http.IncomingHttpHeaders
+  location: string | undefined
+  message: http.IncomingMessage
+  request: http.ClientRequest
+  state: AbortState
+  discard: () => void
+}
+
+export type PinnedLookup = (
+  hostname: string,
+  options: unknown,
+  callback: (
+    err: NodeJS.ErrnoException | null,
+    address: string | LookupAddress[],
+    family?: number,
+  ) => void,
+) => void
+
+/**
+ * The pin.
+ *
+ * Node calls this instead of `dns.lookup` when opening the socket, so the
+ * address we validated is the address connected to. The hostname still travels
+ * as SNI and `Host:`, so TLS verification and virtual hosting are unaffected —
+ * only the resolution step is taken away from the stack.
+ *
+ * If it is ever called for a different name, something re-resolved behind our
+ * back and the request dies rather than proceeding unpinned. That branch should
+ * be unreachable; it is exported so the test suite can prove it still bites.
+ */
+export function createPinnedLookup(args: {
+  expectedHostname: string
+  pinned: { text: string; family: 4 | 6 }
+  url: string
+}): PinnedLookup {
+  return (hostname, options, callback) => {
+    if (hostname !== args.expectedHostname) {
+      callback(
+        new SsrfBlockedError({
+          reason: 'unpinned-resolution',
+          message: `HTTP stack tried to resolve ${hostname}, but the pinned host is ${args.expectedHostname}`,
+          url: args.url,
+          hostname,
+        }),
+        '',
+      )
+      return
+    }
+    const all = (options as { all?: boolean } | undefined)?.all === true
+    if (all) {
+      callback(null, [{ address: args.pinned.text, family: args.pinned.family }])
+    } else {
+      callback(null, args.pinned.text, args.pinned.family)
+    }
+  }
+}
+
+function performRequest(args: {
+  url: URL
+  method: string
+  headers: Record<string, string>
+  body: string | Uint8Array | null
+  pinned: ResolvedAddress
+  hostname: string
+  timeoutMs: number
+  totalTimeoutMs: number
+  maxResponseBytes: number
+  signal: AbortSignal | undefined
+}): Promise<RawResult> {
+  const isHttps = args.url.protocol === 'https:'
+  const transport = isHttps ? https : http
+
+  const lookup = createPinnedLookup({
+    expectedHostname: args.hostname,
+    pinned: args.pinned,
+    url: args.url.href,
+  })
+
+  return new Promise<RawResult>((resolve, reject) => {
+    const state: AbortState = { cause: null, clearDeadline: () => {} }
+
+    const headers: Record<string, string> = {
+      // Ask for identity so the byte cap counts bytes the caller will actually
+      // see. Decompression ratios are a separate problem, deliberately not
+      // solved here (see README).
+      'accept-encoding': 'identity',
+      // Plenty of APIs answer 403 to a request with no User-Agent. Both
+      // defaults are overridable by the caller.
+      'user-agent': DEFAULT_USER_AGENT,
+      ...args.headers,
+    }
+
+    const request = transport.request(
+      {
+        protocol: args.url.protocol,
+        hostname: args.hostname,
+        port: args.url.port === '' ? (isHttps ? 443 : 80) : Number(args.url.port),
+        path: `${args.url.pathname}${args.url.search}`,
+        method: args.method,
+        headers,
+        lookup,
+        // A fresh, non-pooled agent per request: a pooled socket is a socket
+        // whose destination was validated for some earlier request.
+        agent: new transport.Agent({ keepAlive: false, maxSockets: 1 }),
+        ...(isHttps ? { servername: args.hostname } : {}),
+      },
+      (message) => {
+        const contentLength = Number(message.headers['content-length'])
+        if (Number.isFinite(contentLength) && contentLength > args.maxResponseBytes) {
+          message.destroy()
+          request.destroy()
+          reject(new ResponseTooLargeError(args.maxResponseBytes, args.url.href))
+          return
+        }
+        resolve({
+          status: message.statusCode ?? 0,
+          statusText: message.statusMessage ?? '',
+          headers: message.headers,
+          location: message.headers.location,
+          message,
+          request,
+          state,
+          discard: () => {
+            state.clearDeadline()
+            message.resume()
+            message.destroy()
+            request.destroy()
+          },
+        })
+      },
+    )
+
+    // A whole-operation deadline, not merely an idle-socket one. A server that
+    // trickles one byte a second is never idle and would otherwise hang here
+    // for as long as it liked.
+    const abortWith = (cause: Error): void => {
+      state.cause = cause
+      request.destroy(cause)
+    }
+    const deadline = setTimeout(
+      () => abortWith(new SafeFetchTimeoutError(args.totalTimeoutMs, args.url.href)),
+      args.timeoutMs,
+    )
+    deadline.unref?.()
+    state.clearDeadline = () => clearTimeout(deadline)
+
+    // The idle timeout catches a stalled connect before the deadline expires.
+    request.setTimeout(args.timeoutMs, () => {
+      abortWith(new SafeFetchTimeoutError(args.totalTimeoutMs, args.url.href))
+    })
+
+    request.on('error', (error) => {
+      state.clearDeadline()
+      reject(state.cause ?? error)
+    })
+
+    if (args.signal !== undefined) {
+      const abortError = (): Error =>
+        new DOMException('The operation was aborted.', 'AbortError')
+      if (args.signal.aborted) {
+        abortWith(abortError())
+      } else {
+        args.signal.addEventListener('abort', () => abortWith(abortError()), { once: true })
+      }
+    }
+
+    if (args.body !== null) request.write(args.body)
+    request.end()
+  })
+}
+
+/**
+ * Wrap the Node response in a web `Response`, enforcing the size cap as the
+ * bytes arrive. Buffer-then-check would already have spent the memory.
+ */
+function buildResponse(result: RawResult, maxResponseBytes: number): Response {
+  const headers = new Headers()
+  for (const [key, value] of Object.entries(result.headers)) {
+    if (value === undefined) continue
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(key, item)
+    } else {
+      headers.set(key, value)
+    }
+  }
+
+  const bodyless = result.status === 204 || result.status === 205 || result.status === 304
+  let body: ReadableStream<Uint8Array> | null = null
+
+  if (!bodyless) {
+    let received = 0
+    body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        result.message.on('data', (chunk: Buffer) => {
+          received += chunk.byteLength
+          if (received > maxResponseBytes) {
+            result.message.destroy()
+            result.request.destroy()
+            controller.error(
+              new ResponseTooLargeError(maxResponseBytes, result.message.url ?? ''),
+            )
+            return
+          }
+          controller.enqueue(new Uint8Array(chunk))
+          if ((controller.desiredSize ?? 1) <= 0) result.message.pause()
+        })
+        result.message.on('end', () => {
+          result.state.clearDeadline()
+          try {
+            controller.close()
+          } catch {
+            // Already errored by the size cap.
+          }
+        })
+        result.message.on('error', (error) => {
+          result.state.clearDeadline()
+          try {
+            // Prefer the real cause: a torn-down request surfaces here as a
+            // bare "aborted", which tells the caller nothing.
+            controller.error(result.state.cause ?? error)
+          } catch {
+            // Already closed.
+          }
+        })
+      },
+      pull() {
+        result.message.resume()
+      },
+      cancel() {
+        result.state.clearDeadline()
+        result.message.destroy()
+        result.request.destroy()
+      },
+    })
+  } else {
+    result.state.clearDeadline()
+    result.message.resume()
+  }
+
+  return new Response(body, {
+    status: result.status,
+    statusText: result.statusText,
+    headers,
+  })
+}

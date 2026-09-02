@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+.pnp.*
+.yarn/*
+
+# build output
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# secrets — NEVER commit. History is permanent once this repo goes public.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+credentials.json
+service-account*.json
+
+# local state
+.DS_Store
+*.log
+tmp/
+.cache/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# working notes, not for publication — kept locally, never committed
+BRIEF.md
