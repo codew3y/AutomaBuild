@@ -1191,34 +1191,6 @@ function Editor() {
       <header className="toolbar">
         <strong className="brand">Automabuild</strong>
 
-        {/*
-          Out of the flow, back to the list.
-
-          A dropdown made the flow list a detail of the editor; an exit makes
-          the list the place you came from. It carries the flow's name because
-          "which flow am I in" is the question a canvas full of steps cannot
-          answer on its own.
-        */}
-        <button
-          className="exit-flow"
-          onClick={() => {
-            editorStore.getState().select(null)
-            // Back to Builder as well as back to the list: History is a mode
-            // of a flow, and arriving in it again on the next flow you open
-            // would be a state you never asked for.
-            editorStore.getState().setMode('edit')
-            setSetupOpen(false)
-            setFlowId(null)
-            loadFlows()
-          }}
-          title="Back to all flows"
-        >
-          <span aria-hidden="true">✕</span>
-          <span className="exit-flow-name">
-            {flowList.find((flow) => flow.flowId === flowId)?.name ?? 'Flow'}
-          </span>
-        </button>
-
         <div className="modes">
           <button
             className={mode === 'edit' ? 'mode active' : 'mode'}
@@ -1333,6 +1305,34 @@ function Editor() {
             {runSummary.notReached} not reached · {runSummary.totalMs} ms
           </span>
         )}
+
+        {/*
+          Out of the flow, back to the list.
+
+          A dropdown made the flow list a detail of the editor; an exit makes
+          the list the place you came from. It carries the flow's name because
+          "which flow am I in" is the question a canvas full of steps cannot
+          answer on its own.
+        */}
+        <button
+          className="exit-flow"
+          onClick={() => {
+            editorStore.getState().select(null)
+            // Back to Builder as well as back to the list: History is a mode
+            // of a flow, and arriving in it again on the next flow you open
+            // would be a state you never asked for.
+            editorStore.getState().setMode('edit')
+            setSetupOpen(false)
+            setFlowId(null)
+            loadFlows()
+          }}
+          title="Back to all flows"
+        >
+          <span aria-hidden="true">✕</span>
+          <span className="exit-flow-name">
+            {flowList.find((flow) => flow.flowId === flowId)?.name ?? 'Flow'}
+          </span>
+        </button>
       </header>
 
       {needsKey && (

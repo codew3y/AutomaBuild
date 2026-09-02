@@ -1046,21 +1046,30 @@ button.danger.inline { width: auto; margin-top: 0; }
 
 /* -------------------------------------------------------------- exit flow */
 
-/* Reads as a breadcrumb rather than a button: it is where you came from, and a
-   heavier control here would compete with Publish. */
+/* Sits at the far right, past Publish, and is separated from it by a rule
+   rather than by space alone: leaving the flow is a different kind of act from
+   the actions beside it, and a gap on its own reads as an accident of layout.
+
+   Quiet by default. It is where you came from rather than something to do, and
+   a filled control here would compete with the one button that matters. */
 .exit-flow {
   display: flex;
   align-items: center;
   gap: .4rem;
+  margin-left: .35rem;
+  padding-left: .7rem;
   border-color: transparent;
+  border-left: 1px solid var(--line);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   background: transparent;
   color: var(--muted);
-  font-weight: 600;
-  max-width: 16rem;
+  font-weight: 500;
+  max-width: 13rem;
 }
 .exit-flow:hover:not(:disabled) {
   background: var(--surface-2);
-  border-color: var(--line);
+  border-color: transparent;
+  border-left-color: var(--line);
   color: var(--fg);
 }
 .exit-flow-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
