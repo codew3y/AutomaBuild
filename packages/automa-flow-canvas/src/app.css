@@ -1,0 +1,1224 @@
+/* AutomaBuild — the editor.
+ *
+ * Desktop only, and the README says so. A flow canvas on a phone is a
+ * different product, not a responsive version of this one.
+ *
+ * The palette follows what automation builders have converged on, and the
+ * convergence is not fashion: a canvas is mostly empty space with a handful of
+ * cards on it, so the surface has to recede and the cards have to sit on top of
+ * it. That means a tinted page rather than white, panels *lighter* than the
+ * page in light mode, one accent used sparingly, and colour carried by small
+ * filled tiles rather than by borders — a border tints the outline of a shape,
+ * a tile reads as an icon from across the room.
+ *
+ * Two theme states. The choice is always explicit and always stamped on the
+ * root, so there is no prefers-color-scheme block to guard against: light lives
+ * on bare :root as the default, and [data-theme='dark'] replaces it. The system
+ * is consulted once, in theme.ts, to pick the first-ever value.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces. `bg` is the canvas and recedes; `surface` is what sits on it. */
+  --bg: #f4f5f8;
+  --surface: #ffffff;
+  --surface-2: #fafbfc;
+  --panel: #ffffff;
+
+  --fg: #16181d;
+  --muted: #6b7280;
+  --line: #e3e6ea;
+  --line-strong: #d0d5dd;
+
+  /* One accent, used for what is selected or primary and almost nothing else.
+     Indigo rather than blue: it stays distinct from the link-blue browsers
+     paint and from the informational blue of the http step. */
+  --accent: #5b5bd6;
+  --accent-soft: #eeeefc;
+  --accent-contrast: #ffffff;
+
+  --error: #b42318;
+  --error-soft: #fef3f2;
+  --warn: #b54708;
+  --warn-soft: #fffaeb;
+  --ok: #067647;
+  --ok-soft: #ecfdf3;
+
+  /* Step kinds. Defined here so the node, its icon tile and anything else that
+     needs one cannot drift apart. */
+  --kind-trigger: #7c3aed;
+  --kind-http: #0284c7;
+  --kind-transform: #b54708;
+  --kind-branch: #047857;
+  --kind-email: #be185d;
+
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-lg: 12px;
+
+  /* Two levels and no more. A canvas with five depths reads as clutter. */
+  --shadow: 0 1px 2px rgb(16 24 40 / .06), 0 1px 3px rgb(16 24 40 / .1);
+  --shadow-lg: 0 8px 24px -4px rgb(16 24 40 / .12), 0 2px 6px -2px rgb(16 24 40 / .06);
+
+  --dot: #d7dae0;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0c0e13;
+  --surface: #16191f;
+  --surface-2: #1b1f26;
+  --panel: #12151b;
+
+  --fg: #e7e9ee;
+  --muted: #939aa8;
+  --line: #262b34;
+  --line-strong: #333a45;
+
+  --accent: #8b8cf5;
+  --accent-soft: #1e1f3d;
+  --accent-contrast: #0c0e13;
+
+  --error: #f97066;
+  --error-soft: #2a1614;
+  --warn: #fdb022;
+  --warn-soft: #2a1f0e;
+  --ok: #47cd89;
+  --ok-soft: #0d2318;
+
+  --kind-trigger: #a78bfa;
+  --kind-http: #38bdf8;
+  --kind-transform: #fbbf24;
+  --kind-branch: #34d399;
+  --kind-email: #f472b6;
+
+  --shadow: 0 1px 2px rgb(0 0 0 / .4), 0 1px 3px rgb(0 0 0 / .3);
+  --shadow-lg: 0 12px 32px -6px rgb(0 0 0 / .55), 0 2px 8px -2px rgb(0 0 0 / .4);
+
+  --dot: #262b34;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; margin: 0; }
+
+body {
+  /* Inter when the machine has it, the system face otherwise. Not loaded over
+     the network: a webfont on a local tool buys a little polish and costs a
+     flash of unstyled text on every start. */
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 13.5px;
+  line-height: 1.5;
+  background: var(--surface);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+}
+
+.editor { display: flex; flex-direction: column; height: 100%; }
+
+/* ------------------------------------------------------------- toolbar */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .5rem .75rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  flex: 0 0 auto;
+  min-height: 3rem;
+}
+
+.toolbar .spacer { flex: 1; }
+
+.palette { display: flex; gap: .3rem; margin-left: .6rem; }
+
+button {
+  font: inherit;
+  font-size: .8rem;
+  font-weight: 500;
+  padding: .35rem .7rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+  transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+button:hover:not(:disabled) { background: var(--surface-2); border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* One focus treatment everywhere, and a visible one: a canvas tool is used
+   from the keyboard more than most, and the default ring disappears against
+   several of these surfaces. */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Publish is the one filled button in the interface. Filling more than one
+   would leave nothing to say which is the action of the screen. */
+button.publish {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 600;
+}
+button.publish:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button.publish:disabled {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--muted);
+}
+
+/* Three states, visibly different at a glance rather than three shades of
+   grey — the point of the indicator is to be readable peripherally. */
+.save { font-size: .8rem; padding: .25rem .5rem; border-radius: .3rem; }
+.save-saved { color: var(--ok); }
+.save-saving { color: var(--muted); }
+.save-unsaved { color: var(--warn); font-weight: 600; }
+
+.restored {
+  padding: .4rem .9rem;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-bottom: 1px solid var(--line);
+  font-size: .85rem;
+}
+
+/* ----------------------------------------------------------- workspace */
+
+.workspace { display: flex; flex: 1; min-height: 0; }
+.workspace .react-flow { flex: 1; }
+
+.panel {
+  width: 22rem;
+  flex: 0 0 22rem;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  overflow-y: auto;
+}
+.panel-section h2 { font-weight: 600; }
+
+.panel-section { padding: .9rem; border-bottom: 1px solid var(--line); }
+.panel-section h2 {
+  font-size: .7rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+  margin: 0 0 .7rem;
+}
+
+.muted { color: var(--muted); font-size: .85rem; }
+
+.count { display: inline-block; min-width: 1.2em; text-align: center; border-radius: 1em; padding: 0 .35em; font-size: .75rem; margin-left: .25rem; }
+.count-error { background: var(--error); color: var(--surface); }
+.count-warn { background: var(--warn); color: var(--surface); }
+
+.issues { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
+.issue button {
+  width: 100%;
+  text-align: left;
+  font-size: .82rem;
+  line-height: 1.35;
+  border-left-width: 3px;
+  white-space: normal;
+}
+.issue-error button { border-left-color: var(--error); }
+.issue-warning button { border-left-color: var(--warn); }
+
+.field { display: flex; flex-direction: column; gap: .2rem; margin-bottom: .6rem; }
+.field span { font-size: .78rem; color: var(--muted); }
+.field input {
+  font: inherit;
+  font-size: .85rem;
+  padding: .35rem .5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--fg);
+}
+.field input { transition: border-color .12s ease; }
+.field input:hover, .field textarea:hover, .field select:hover { border-color: var(--line-strong); }
+
+/* ---------------------------------------------------------------- node */
+
+/* A card, not a bordered box.
+ *
+ * The colour of a step lives in a filled icon tile rather than a stripe down
+ * the edge. A 3px border tints the outline of a shape; a tile reads as an icon
+ * from across the canvas, which is the distance these are actually looked at
+ * from. It also frees the border to mean one thing only — selection and
+ * validation — instead of competing with the kind for the same pixels. */
+.step-node {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  min-width: 13rem;
+  padding: .6rem .75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  transition: box-shadow .12s ease, border-color .12s ease;
+}
+.step-node:hover { box-shadow: var(--shadow-lg); }
+
+.step-node[data-selected='true'] {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-lg), 0 0 0 3px var(--accent-soft);
+}
+
+.step-glyph {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  font-size: .95rem;
+  /* The tile is the kind's colour at low opacity with the glyph at full
+     strength, so every kind reads as the same weight regardless of how dark
+     its hue happens to be. */
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.step-body { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+.step-label {
+  font-weight: 600;
+  font-size: .82rem;
+  letter-spacing: -.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.step-kind {
+  font-size: .68rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+
+.step-badge {
+  margin-left: auto;
+  background: var(--error);
+  color: var(--surface);
+  font-size: .7rem;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 1rem;
+  display: grid;
+  place-items: center;
+}
+
+/* React Flow paints handles small by default; a webhook editor is a
+   drag-heavy interface and a 6px target is genuinely hard to hit. */
+.react-flow__handle { width: 9px; height: 9px; }
+
+/* ------------------------------------------------ React Flow chrome fixes */
+
+/* The Controls buttons ship with a light-grey SVG that is invisible against a
+   white panel — and completely invisible in dark mode, where the panel is
+   white and the icon stays grey. Both colours are set explicitly rather than
+   inherited, because the library paints the fill on the path. */
+.react-flow__controls {
+  box-shadow: 0 1px 4px rgb(0 0 0 / .18);
+  border-radius: .4rem;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  width: 26px;
+  height: 26px;
+}
+.react-flow__controls-button:hover { background: var(--panel); }
+.react-flow__controls-button svg { fill: var(--fg); }
+.react-flow__controls-button:disabled svg { fill: var(--muted); opacity: .5; }
+
+.react-flow__attribution { font-size: .65rem; opacity: .5; }
+
+/* ------------------------------------------------------------- toolbar */
+
+.brand { font-size: .95rem; letter-spacing: -.01em; }
+
+.modes { display: flex; gap: .2rem; margin-left: .4rem; }
+.modes .mode { font-size: .8rem; }
+.modes .mode.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+.run-summary { font-size: .8rem; color: var(--muted); font-family: ui-monospace, monospace; }
+
+.restored { display: flex; align-items: center; gap: .6rem; }
+.restored span { flex: 1; }
+.restored .dismiss {
+  border: none;
+  background: transparent;
+  padding: .1rem .4rem;
+  font-size: .9rem;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+}
+.restored .dismiss:hover { color: var(--fg); }
+
+button.danger { border-color: var(--error); color: var(--error); margin-top: .5rem; width: 100%; }
+
+/* ---------------------------------------------------------------- tabs */
+
+.tabs { display: flex; border-bottom: 1px solid var(--line); }
+.tabs button {
+  flex: 1;
+  border: none;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  padding: .5rem;
+  font-size: .82rem;
+  color: var(--muted);
+}
+.tabs button.active { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* ------------------------------------------------------------- mapping */
+
+.field select {
+  font: inherit;
+  font-size: .85rem;
+  padding: .35rem .5rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--surface);
+  color: var(--fg);
+}
+
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  padding: .5rem .6rem;
+  margin: .5rem 0 .9rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--surface);
+  font-family: ui-monospace, monospace;
+  font-size: .8rem;
+  word-break: break-word;
+}
+.preview-label { font-family: inherit; font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.preview-value { color: var(--ok); }
+/* An unresolved reference is a warning, not a value. Rendering it as ordinary
+   text would let a mapping that resolves to nothing look like it worked. */
+.preview-missing { color: var(--warn); }
+
+.tree-heading { margin-top: 1rem; }
+.tree { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .15rem; }
+
+/* Three columns, not a flex row.
+   
+   With flex, the kind label sat immediately after the name, so its position
+   moved with the length of the name and nothing lined up down the list. Fixed
+   columns mean name, kind and value each start at the same place on every row,
+   which is what makes the tree scannable. */
+.pill {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 3.6rem 7.5rem;
+  align-items: baseline;
+  gap: .4rem;
+  width: 100%;
+  text-align: left;
+  font-size: .78rem;
+  padding: .22rem .45rem;
+}
+.pill:disabled { opacity: .6; cursor: default; }
+
+/* Every cell truncates rather than wrapping: one row per field keeps the
+   columns aligned, and a wrapped name would push its own kind and value out of
+   line with everything above it. */
+.pill-key,
+.pill-value {
+  font-family: ui-monospace, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pill-kind {
+  font-size: .66rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pill-value { color: var(--muted); text-align: right; }
+
+/* ----------------------------------------------------------- run viewer */
+
+.step-outcome {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  font-size: .78rem;
+  font-weight: 700;
+}
+.step-ms { font-weight: 400; font-size: .68rem; color: var(--muted); }
+
+.outcome-succeeded { color: var(--ok); }
+.outcome-failed { color: var(--error); }
+.outcome-not_reached { color: var(--muted); }
+.outcome-running { color: var(--accent); }
+
+/* A step the run never reached is dimmed rather than hidden, because "it did
+   not run" is the answer the viewer usually exists to give. */
+.step-node[data-outcome='not_reached'] { opacity: .45; border-style: dashed; }
+.step-node[data-outcome='failed'] { border-color: var(--error); }
+
+.panel-section h3 { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: .8rem 0 .3rem; }
+.panel-section pre {
+  margin: 0;
+  padding: .5rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--surface);
+  font-size: .74rem;
+  overflow-x: auto;
+}
+
+.outcome { font-weight: 600; }
+
+/* --------------------------------------------------------- setup dialog */
+
+.selected-step {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .7rem;
+  font-size: .8rem;
+}
+.selected-step span { flex: 1; color: var(--muted); }
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(9 11 15 / .5);
+  backdrop-filter: blur(2px);
+  display: grid;
+  place-items: center;
+  z-index: 50;
+  padding: 2rem;
+}
+
+.dialog {
+  width: min(30rem, 100%);
+  box-shadow: var(--shadow-lg);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: .6rem;
+  box-shadow: 0 12px 40px rgb(0 0 0 / .3);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  padding: .7rem .9rem;
+  border-bottom: 1px solid var(--line);
+}
+.dialog-header > div { flex: 1; }
+.dialog-header .muted { font-size: .78rem; }
+
+.dialog-body { padding: .9rem; overflow-y: auto; }
+
+.dialog-footer {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .7rem .9rem;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 0 0 .6rem .6rem;
+}
+.dialog-footer .spacer { flex: 1; }
+
+/* The panel version is full-width; inside the dialog it sits beside Done. */
+button.danger.inline { width: auto; margin-top: 0; }
+
+.dialog .dismiss {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: .95rem;
+  line-height: 1;
+  padding: .2rem .4rem;
+  cursor: pointer;
+}
+.dialog .dismiss:hover { color: var(--fg); }
+
+/* --------------------------------------------------------- step library */
+
+/* The left panel is narrower than the right one on purpose: it holds four
+   fixed cards, while the right panel holds mapping trees that need the room. */
+.library {
+  width: 14.5rem;
+  flex: 0 0 14.5rem;
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.library-head { padding: .9rem .9rem .6rem; }
+.library-head h2 {
+  font-size: .8rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+  margin: 0 0 .3rem;
+}
+.library-head p { margin: 0; font-size: .78rem; }
+
+.library-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 .6rem;
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+}
+
+/* A library card is a preview of the node it creates, tile and all — the
+   thing you drag should look like the thing you get. */
+.library-card {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  width: 100%;
+  text-align: left;
+  padding: .5rem .55rem;
+  border-radius: var(--radius);
+  /* grab, not pointer: the card's primary gesture is the drag. */
+  cursor: grab;
+}
+.library-card:active { cursor: grabbing; }
+
+.library-glyph {
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  font-size: .9rem;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.library-text { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+.library-name { font-weight: 600; font-size: .84rem; }
+.library-blurb { font-size: .72rem; color: var(--muted); }
+
+.library-foot {
+  margin: auto 0 0;
+  padding: .9rem;
+  font-size: .74rem;
+  border-top: 1px solid var(--line);
+}
+
+/* A body field is a body: it gets the room to look like one, and it resizes
+   vertically only — horizontal resize would break the dialog's layout. */
+.field textarea {
+  font: inherit;
+  font-size: .85rem;
+  line-height: 1.45;
+  padding: .4rem .5rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--surface);
+  color: var(--fg);
+  resize: vertical;
+  min-height: 5.5rem;
+}
+.field textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+/* ----------------------------------------------------------- run history */
+
+.run-row {
+  display: flex;
+  flex-direction: column;
+  gap: .2rem;
+  width: 100%;
+  text-align: left;
+  padding: .45rem .6rem;
+  font-size: .8rem;
+}
+.run-row.active { border-color: var(--accent); background: var(--accent-soft); }
+
+.run-row-top { display: flex; align-items: baseline; gap: .4rem; }
+.run-id { font-family: ui-monospace, monospace; font-weight: 600; }
+.run-when { margin-left: auto; font-size: .72rem; color: var(--muted); }
+.run-row-bottom { font-size: .72rem; }
+
+.run-status { font-weight: 700; }
+.status-succeeded { color: var(--ok); }
+.status-failed { color: var(--error); }
+.status-running { color: var(--accent); }
+.status-cancelled { color: var(--muted); }
+
+/* ------------------------------------------------------- publish state */
+
+/* Published and unchanged is a status, not a button: pressing it would mint a
+   version identical to the last one. It reads as calm rather than actionable. */
+.published {
+  font-size: .8rem;
+  font-weight: 600;
+  color: var(--ok);
+  padding: .3rem .5rem;
+}
+
+.discard { border-color: var(--warn); color: var(--warn); }
+
+.publish-error {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--fg);
+}
+
+/* ---------------------------------------------------- trigger endpoint */
+
+.endpoint {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  padding: .6rem .7rem;
+  margin-bottom: .9rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: .35rem;
+  background: var(--panel);
+}
+
+/* The URL wraps rather than scrolling: it is meant to be read and copied, and
+   a horizontally scrolling box hides the half that matters. */
+.endpoint-url {
+  font-family: ui-monospace, monospace;
+  font-size: .78rem;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.endpoint-meta { display: flex; flex-direction: column; gap: .2rem; font-size: .74rem; }
+.endpoint-meta code { font-size: .72rem; }
+.endpoint-warn { color: var(--warn); font-weight: 600; }
+.endpoint button { align-self: flex-start; font-size: .78rem; }
+.endpoint-none { margin: 0 0 .9rem; }
+
+/* ------------------------------------------------------- panel toggles */
+
+.panel-toggle {
+  font-size: 1rem;
+  line-height: 1;
+  padding: .3rem .5rem;
+  color: var(--muted);
+}
+.panel-toggle:hover { color: var(--fg); }
+
+/* A pressed toggle means the panel is showing. Colour alone would leave the
+   state invisible to anyone who cannot see it, so aria-pressed carries it too
+   and this is only the visible half. */
+.panel-toggle[aria-pressed='true'] { color: var(--fg); border-color: var(--muted); }
+
+.panel-toggle.right { margin-left: .2rem; }
+
+/* `hidden` on a flex child is overridden by `display: flex` unless this says
+   otherwise — the attribute would be set and the panel would stay visible. */
+.panel[hidden] { display: none; }
+
+.tree-heading { display: flex; align-items: baseline; gap: .4rem; }
+.tree-source { font-size: .68rem; font-weight: 400; text-transform: none; letter-spacing: 0; margin-left: auto; }
+.tree-missing { font-size: .76rem; margin: 0 0 .5rem; }
+.tree-missing code { font-size: .72rem; }
+
+.needs-key { background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.needs-key input {
+  font: inherit;
+  font-size: .82rem;
+  padding: .25rem .5rem;
+  border: 1px solid var(--line);
+  border-radius: .3rem;
+  background: var(--surface);
+  color: var(--fg);
+  min-width: 14rem;
+}
+
+
+.field-locked { color: var(--accent); font-weight: 600; }
+
+/* --------------------------------------------------- mapping by step */
+
+.sources { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .3rem; }
+
+.source-head {
+  display: flex;
+  align-items: baseline;
+  gap: .45rem;
+  width: 100%;
+  text-align: left;
+  font-size: .8rem;
+  padding: .35rem .5rem;
+}
+.source-head[aria-expanded='true'] { border-color: var(--accent); }
+.source-head:disabled { opacity: .55; }
+
+.source-caret { width: .7rem; color: var(--muted); }
+.source-name { font-weight: 600; }
+.source-count { margin-left: auto; font-size: .7rem; }
+
+/* The fields of one step, indented as a group rather than per row — the rows
+   themselves stay flush so their text lines up down the list. */
+.sources .tree { margin: .25rem 0 .5rem 1.15rem; }
+
+.target-note { font-size: .78rem; margin: 0 0 .4rem; }
+
+/* ------------------------------------------------- the setup dialog, split */
+
+/* Wide enough for two panes without either feeling cramped, and capped so it
+   does not stretch across a large monitor into something you have to move your
+   head to read. */
+.dialog-wide { width: min(56rem, 100%); max-height: 86vh; }
+
+.dialog-body.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.split-left,
+.split-right {
+  padding: .9rem;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* The divider. On the right pane rather than between the two as a gap, so the
+   line runs the full height of the body whichever side is taller. */
+.split-right { border-left: 1px solid var(--line); background: var(--panel); }
+
+/* Under 62rem the two panes stop being two: the mapping tree needs its own
+   width to stay readable, and half of a narrow dialog is not enough for it. */
+@media (max-width: 62rem) {
+  .dialog-body.split { grid-template-columns: minmax(0, 1fr); }
+  .split-right { border-left: none; border-top: 1px solid var(--line); }
+}
+
+/* The flow picker sits with the brand, because which flow is open is closer to
+   "where am I" than to "what can I do here". */
+.flow-picker {
+  font: inherit;
+  font-size: .85rem;
+  font-weight: 600;
+  padding: .25rem .4rem;
+  border: 1px solid var(--line);
+  border-radius: .35rem;
+  background: var(--surface);
+  color: var(--fg);
+  max-width: 14rem;
+}
+
+/* ------------------------------------------------ validation on the canvas */
+
+/* With no validation panel, the step itself has to carry the news. An outline
+   as well as a border colour, because a 1px border against a coloured left
+   edge is easy to miss on a busy canvas — and the tinted background makes a
+   broken step findable without reading any of them. */
+.step-node[data-error='true'] {
+  border-color: var(--error);
+  background: var(--error-soft);
+  box-shadow: var(--shadow), 0 0 0 3px color-mix(in srgb, var(--error) 18%, transparent);
+}
+
+/* A warning is not an error: it does not block publishing, so it is marked
+   without shouting. */
+.step-node[data-warn='true'] {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+.step-node[data-warn='true'] .step-badge { background: var(--warn); }
+
+/* ------------------------------------------------------- collapse handle */
+
+/* Against the panel edge rather than in the header, so it points at what it
+   acts on. It floats over the canvas, which is why it needs its own background
+   and shadow — the dot grid behind it would otherwise read straight through. */
+.edge-toggle {
+  position: absolute;
+  top: .6rem;
+  left: calc(14rem + .5rem);
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  width: 1.65rem;
+  height: 1.65rem;
+  padding: 0;
+  border: 1px solid var(--accent);
+  border-radius: .3rem;
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgb(0 0 0 / .15);
+  transition: left .12s ease;
+}
+.edge-toggle:hover { background: var(--panel); }
+
+/* When the panel is gone the handle takes its place at the canvas edge, and
+   the chevron flips to point the way the panel will come back. */
+.edge-toggle.collapsed { left: .5rem; }
+.edge-toggle.collapsed svg { transform: scaleX(-1); }
+
+.edge-toggle svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The workspace becomes the positioning context for the handle. */
+.workspace { position: relative; }
+
+/* ------------------------------------------------------------ theme toggle */
+
+.theme-toggle {
+  font-size: .95rem;
+  line-height: 1;
+  padding: .3rem .5rem;
+  color: var(--muted);
+}
+.theme-toggle:hover { color: var(--fg); }
+
+/* React Flow paints its own background colour for the dot grid, which does not
+   follow our tokens. Setting it here keeps the canvas in step with the theme
+   instead of staying white under a dark page. */
+.react-flow__background { background: var(--bg); }
+.react-flow__background pattern circle { fill: var(--line); }
+
+/* A trigger's dialog has one pane, so it does not need the width two would. */
+.dialog-wide:has(.dialog-body:not(.split)) { width: min(34rem, 100%); }
+
+/* Muted until hovered: archiving takes a webhook address out of service, and a
+   permanently red control beside the flow name reads as a warning about the
+   flow rather than an action available on it. */
+.flow-archive {
+  font-size: .8rem;
+  line-height: 1;
+  padding: .3rem .45rem;
+  color: var(--muted);
+}
+.flow-archive:hover { color: var(--error); border-color: var(--error); }
+
+/* ------------------------------------------------------- canvas surface */
+
+/* The dot grid and the edges have to follow the theme; React Flow paints both
+   with its own defaults otherwise, which stay light under a dark page. */
+.react-flow__background pattern circle { fill: var(--dot); }
+.react-flow__edge-path { stroke: var(--line-strong); stroke-width: 1.5; }
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:hover .react-flow__edge-path { stroke: var(--accent); }
+.react-flow__edge-text { fill: var(--muted); font-size: 10px; }
+.react-flow__edge-textbg { fill: var(--bg); }
+
+.react-flow__handle {
+  width: 9px;
+  height: 9px;
+  background: var(--surface);
+  border: 1.5px solid var(--line-strong);
+}
+.react-flow__handle:hover { border-color: var(--accent); background: var(--accent); }
+
+.react-flow__controls {
+  box-shadow: var(--shadow);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+.react-flow__controls-button {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  width: 26px;
+  height: 26px;
+}
+.react-flow__controls-button:hover { background: var(--surface-2); }
+.react-flow__controls-button svg { fill: var(--fg); }
+.react-flow__controls-button:disabled svg { fill: var(--muted); opacity: .5; }
+
+/* =========================================================== the overview */
+
+.overview {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.75rem 2rem 3rem;
+  background: var(--bg);
+}
+
+.overview-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  max-width: 68rem;
+  margin: 0 auto 1.5rem;
+}
+.overview-head > div { flex: 1; }
+.overview-head h1 { font-size: 1.35rem; font-weight: 650; letter-spacing: -.02em; margin: 0 0 .2rem; }
+.overview-head p { margin: 0; }
+
+.overview-empty { max-width: 68rem; margin: 0 auto; }
+
+/* A grid that reflows rather than a fixed column count: the useful number of
+   columns depends on the window, not on a number picked here. */
+.flow-grid {
+  list-style: none;
+  margin: 0 auto;
+  padding: 0;
+  max-width: 68rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: .75rem;
+}
+
+/* The archive sits over the card rather than inside it, so a click on the card
+   can never be a click on the archive. */
+.flow-grid li { position: relative; }
+
+.flow-card {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  width: 100%;
+  text-align: left;
+  padding: .85rem 2.5rem .85rem .9rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.flow-card:hover { border-color: var(--accent); box-shadow: var(--shadow-lg); background: var(--surface); }
+
+.flow-card-top { display: flex; align-items: baseline; gap: .4rem; }
+.flow-card-name {
+  font-size: .92rem;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flow-card-meta,
+.flow-card-runs { display: flex; align-items: baseline; gap: .35rem; font-size: .74rem; }
+
+.flow-live { color: var(--ok); font-weight: 600; }
+.flow-draft { color: var(--muted); }
+
+.flow-card-archive {
+  position: absolute;
+  top: .6rem;
+  right: .6rem;
+  padding: .2rem .4rem;
+  font-size: .75rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.flow-card-archive:hover:not(:disabled) {
+  color: var(--error);
+  border-color: var(--error);
+  background: var(--error-soft);
+}
+
+/* -------------------------------------------------------------- exit flow */
+
+/* Sits at the far right, past Publish, and is separated from it by a rule
+   rather than by space alone: leaving the flow is a different kind of act from
+   the actions beside it, and a gap on its own reads as an accident of layout.
+
+   Quiet by default. It is where you came from rather than something to do, and
+   a filled control here would compete with the one button that matters. */
+.exit-flow {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  margin-left: .35rem;
+  padding-left: .7rem;
+  border-color: transparent;
+  border-left: 1px solid var(--line);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 500;
+  max-width: 13rem;
+}
+.exit-flow:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: transparent;
+  border-left-color: var(--line);
+  color: var(--fg);
+}
+.exit-flow-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --------------------------------------------------------- canvas helpers -- */
+
+/*
+  The ghost of the next step.
+
+  Positioned in flow coordinates through a viewport portal, so it pans and
+  zooms with the graph the way a real node would — a hint that stayed put
+  while the canvas moved would point at nothing.
+*/
+/*
+  Sized and laid out as a step card, because that is what it is a ghost of.
+
+  It was a fixed 200 by 64 next to a card that is 208 by 44, so it lined up
+  with nothing and the stub joining them met the card above its handle. The
+  width and height now come in as custom properties, measured from the card it
+  follows, and the row layout mirrors `.step-node` exactly — same gap, same
+  padding, same radius — so the two read as the same kind of object.
+*/
+.append-hint {
+  position: absolute;
+  /*
+    React Flow's viewport is pointer-events: none, and every node inside it
+    turns them back on for itself. A portal into that viewport inherits the
+    none — so the hint never saw the dragover or the drop, the pane underneath
+    handled them instead, and a step dropped on the hint appeared at the cursor
+    with no edge. It looked like connecting was broken; nothing was ever
+    dropped on the hint at all.
+  */
+  pointer-events: all;
+  left: var(--x);
+  top: var(--y);
+  width: var(--w);
+  height: var(--h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .6rem;
+  padding: .6rem .75rem;
+  box-sizing: border-box;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  color: var(--muted);
+  opacity: .75;
+  transition: opacity 120ms, border-color 120ms, background 120ms, color 120ms;
+}
+
+.append-hint.over {
+  opacity: 1;
+  border-color: var(--accent);
+  border-style: solid;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.append-hint-plus { font-size: 1rem; line-height: 1; }
+.append-hint-text { font-size: .75rem; white-space: nowrap; }
+
+/*
+  A dashed stub from the last step to the hint, so the two read as joined.
+
+  Spans exactly the gap the hint was placed at, and sits on the vertical
+  centre — which is the same line the card's handles sit on, now that the two
+  are the same height.
+*/
+.append-hint::before {
+  content: '';
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  width: var(--gap);
+  border-top: 1.5px dashed var(--line-strong);
+}
+
+.append-hint.over::before { border-color: var(--accent); }
+
+/*
+  The controls that sit on an edge.
+
+  The wrapper must not take the pointer: it spans the label area, and anything
+  solid there would eat drags meant for the canvas underneath. Only the
+  scissors themselves are clickable, and only once the edge is hovered.
+*/
+.edge-tools {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  font-size: 10px;
+}
+
+.edge-label {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.edge-cut {
+  pointer-events: all;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  /* Invisible until the edge is hovered, but never display:none — a hidden
+     button cannot be the thing the pointer is already over when it appears. */
+  opacity: 0;
+  transform: scale(0.8);
+  transition: opacity 100ms, transform 100ms, color 100ms, border-color 100ms;
+}
+
+.edge-tools.shown .edge-cut,
+.edge-cut:focus-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.edge-cut:hover {
+  color: var(--error);
+  border-color: var(--error);
+  background: var(--error-soft);
+}
+
+.edge-hit { pointer-events: stroke; cursor: pointer; }
+
+/*
+  The line under a field.
+
+  Small and quiet: it is there to be found when someone is unsure what a field
+  wants, not to compete with the field itself. Given a max width so a long hint
+  wraps into a readable column rather than one long line across the panel.
+*/
+.field-hint {
+  font-size: .7rem;
+  line-height: 1.4;
+  margin-top: .1rem;
+  max-width: 46ch;
+}

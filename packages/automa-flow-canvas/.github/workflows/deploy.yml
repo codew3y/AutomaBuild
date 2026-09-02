@@ -1,0 +1,45 @@
+# Deploys the built app to GitHub Pages.
+#
+# Publishes to a `gh-pages` branch rather than uploading a Pages artifact.
+# Artifact storage is an account-wide quota that other repositories share, and
+# when it fills, an artifact-based deploy fails for a reason that has nothing
+# to do with this project. A branch has no such limit.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - run: npm ci
+      - run: npm run build
+
+      # Pages serves the branch as-is and would otherwise try to run the
+      # output through Jekyll, which ignores files and folders beginning with
+      # an underscore.
+      - run: touch dist/.nojekyll
+
+      - name: publish to gh-pages
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan gh-pages-tmp
+          git --work-tree dist add --all
+          git --work-tree dist commit -m "deploy ${GITHUB_SHA::7}"
+          git push origin HEAD:gh-pages --force
