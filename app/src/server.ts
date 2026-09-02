@@ -385,6 +385,11 @@ function registerApi(
       endpointId: flow.endpointId,
       scheme: flow.scheme,
       isDefault: flow.flowId === seed.flowId,
+      published: flow.publishedAt !== null,
+      publishedAt: flow.publishedAt?.toISOString() ?? null,
+      runCount: flow.runCount,
+      lastRunAt: flow.lastRunAt?.toISOString() ?? null,
+      lastRunStatus: flow.lastRunStatus,
     }))
   })
 
@@ -440,6 +445,29 @@ function registerApi(
     } catch (error) {
       return reply.code(400).send({ error: (error as Error).message })
     }
+  })
+
+  /**
+   * Archive a flow.
+   *
+   * The seeded flow is refused: it is the one a fresh database is guaranteed to
+   * have, the server recreates it on every boot, and archiving it would leave
+   * the editor with an empty list until someone worked out why.
+   */
+  app.delete('/api/flows/:flowId', async (request, reply) => {
+    const { flowId } = request.params as { flowId: string }
+
+    if (flowId === seed.flowId) {
+      return reply.code(400).send({
+        error: 'the default flow cannot be archived — the server recreates it on every start',
+      })
+    }
+
+    const archived = await catalog.archive(flowId, seed.tenantId)
+    if (!archived) return reply.code(404).send({ error: 'no such flow' })
+
+    console.log(`archived flow ${flowId}`)
+    return reply.code(200).send({ flowId, archived: true })
   })
 
   app.patch('/api/flows/:flowId', async (request, reply) => {
