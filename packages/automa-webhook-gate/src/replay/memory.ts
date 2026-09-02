@@ -1,0 +1,86 @@
+/**
+ * An in-memory replay store.
+ *
+ * For tests and single-process development only, and it says so loudly,
+ * because the failure mode of using it in production is silent: everything
+ * works, every test passes, and replay protection quietly does nothing the
+ * moment a second instance starts. Each process has its own map, so a replayed
+ * request need only reach a different one.
+ */
+
+import {
+  DEFAULT_RETENTION_SECONDS,
+  type DeliveryRecord,
+  type RecordResult,
+  type ReplayStore,
+} from './store.ts'
+
+export interface MemoryStoreOptions {
+  readonly retentionSeconds?: number
+  /** Refuse to construct outside development. */
+  readonly allowInProduction?: boolean
+}
+
+/**
+ * The composite key.
+ *
+ * NUL separates the two ids because it is the one byte neither can contain, so
+ * no pair can collide by containing the separator itself. It is written as an
+ * escape and never as a literal byte — a NUL in source makes git and grep treat
+ * the whole file as binary, which is how this one stopped being greppable.
+ */
+const keyOf = (endpointId: string, dedupKey: string): string => `${endpointId}\u0000${dedupKey}`
+
+export class MemoryReplayStore implements ReplayStore {
+  readonly #seen = new Map<string, Date>()
+  readonly #retentionSeconds: number
+
+  constructor(options: MemoryStoreOptions = {}) {
+    if (process.env.NODE_ENV === 'production' && options.allowInProduction !== true) {
+      throw new Error(
+        'MemoryReplayStore provides no replay protection across processes. ' +
+          'Use PostgresReplayStore, or pass allowInProduction if this really is a single process.',
+      )
+    }
+    this.#retentionSeconds = options.retentionSeconds ?? DEFAULT_RETENTION_SECONDS
+  }
+
+  async record(record: DeliveryRecord): Promise<RecordResult> {
+    // Only successful deliveries are remembered. Recording a rejection would
+    // let an attacker burn a legitimate delivery's key by sending it first
+    // with a broken signature — the real delivery would then arrive and be
+    // dismissed as a duplicate.
+    if (record.outcome !== 'accepted') return { first: true }
+
+    const key = keyOf(record.endpointId, record.dedupKey)
+    const existing = this.#seen.get(key)
+    if (existing !== undefined) {
+      return { first: false, originallyAt: existing }
+    }
+    this.#seen.set(key, record.receivedAt)
+    return { first: true }
+  }
+
+  async release(endpointId: string, dedupKey: string): Promise<void> {
+    this.#seen.delete(keyOf(endpointId, dedupKey))
+  }
+
+  async prune(olderThan: Date): Promise<number> {
+    let removed = 0
+    for (const [key, at] of this.#seen) {
+      if (at < olderThan) {
+        this.#seen.delete(key)
+        removed++
+      }
+    }
+    return removed
+  }
+
+  get size(): number {
+    return this.#seen.size
+  }
+
+  get retentionSeconds(): number {
+    return this.#retentionSeconds
+  }
+}

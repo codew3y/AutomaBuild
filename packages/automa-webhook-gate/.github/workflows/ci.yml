@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The suite runs TypeScript directly, which needs Node's type
+        # stripping (unflagged from 22.18 and 23.6).
+        node: ['22.18', '24']
+
+    services:
+      # A stock image is enough here — this project needs one ordinary table,
+      # no extensions. That is itself worth noticing: the replay store is
+      # deliberately unpartitioned, so there is nothing to configure.
+      postgres:
+        image: postgres:18-trixie
+        env:
+          POSTGRES_DB: webhookgate
+          POSTGRES_USER: webhookgate
+          POSTGRES_PASSWORD: webhookgate
+        ports: ['54331:5432']
+        options: >-
+          --health-cmd "pg_isready -U webhookgate -d webhookgate"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run db:migrate
+      - run: npm test
+
+  # The database tests skip themselves when nothing is listening, which is what
+  # keeps the pure suite runnable with no infrastructure. That is also exactly
+  # how a whole class of tests goes quietly missing, so this job asserts the
+  # count: if the Postgres suite ever silently stops running, the build fails
+  # rather than staying green with less coverage than it claims.
+  no-silent-skips:
+    name: database tests actually ran
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-trixie
+        env:
+          POSTGRES_DB: webhookgate
+          POSTGRES_USER: webhookgate
+          POSTGRES_PASSWORD: webhookgate
+        ports: ['54331:5432']
+        options: >-
+          --health-cmd "pg_isready -U webhookgate -d webhookgate"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm run db:migrate
+      - name: run the suite and assert nothing was skipped
+        run: |
+          npm test 2>&1 | tee test-output.txt
+          skipped=$(grep -oP '^# skipped \K[0-9]+' test-output.txt || echo 0)
+          if [ "$skipped" != "0" ]; then
+            echo "::error::$skipped test(s) skipped — the database suite did not run"
+            exit 1
+          fi
+          echo "no tests skipped"
