@@ -14,12 +14,13 @@
   "author": "Wey Tongol",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/codew3y/automa-safe-fetch.git"
+    "url": "git+https://github.com/codew3y/AutomaBuild.git",
+    "directory": "packages/automa-safe-fetch"
   },
   "bugs": {
-    "url": "https://github.com/codew3y/automa-safe-fetch/issues"
+    "url": "https://github.com/codew3y/AutomaBuild/issues"
   },
-  "homepage": "https://github.com/codew3y/automa-safe-fetch#readme",
+  "homepage": "https://github.com/codew3y/AutomaBuild/tree/main/packages/automa-safe-fetch#readme",
   "type": "module",
   "exports": {
     ".": {

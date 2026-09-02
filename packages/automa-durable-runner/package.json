@@ -6,7 +6,8 @@
   "author": "Wey Tongol",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/codew3y/automa-durable-runner.git"
+    "url": "git+https://github.com/codew3y/AutomaBuild.git",
+    "directory": "packages/automa-durable-runner"
   },
   "type": "module",
   "engines": {
@@ -48,9 +49,9 @@
     "job-queue",
     "chaos-testing"
   ],
-  "homepage": "https://github.com/codew3y/automa-durable-runner#readme",
+  "homepage": "https://github.com/codew3y/AutomaBuild/tree/main/packages/automa-durable-runner#readme",
   "bugs": {
-    "url": "https://github.com/codew3y/automa-durable-runner/issues"
+    "url": "https://github.com/codew3y/AutomaBuild/issues"
   },
   "exports": {
     ".": {

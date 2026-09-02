@@ -6,7 +6,8 @@
   "author": "Wey Tongol",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/codew3y/automa-webhook-gate.git"
+    "url": "git+https://github.com/codew3y/AutomaBuild.git",
+    "directory": "packages/automa-webhook-gate"
   },
   "type": "module",
   "engines": {
@@ -43,9 +44,9 @@
     "standard-webhooks",
     "fastify"
   ],
-  "homepage": "https://github.com/codew3y/automa-webhook-gate#readme",
+  "homepage": "https://github.com/codew3y/AutomaBuild/tree/main/packages/automa-webhook-gate#readme",
   "bugs": {
-    "url": "https://github.com/codew3y/automa-webhook-gate/issues"
+    "url": "https://github.com/codew3y/AutomaBuild/issues"
   },
   "exports": {
     ".": {
