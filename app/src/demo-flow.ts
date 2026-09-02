@@ -25,7 +25,7 @@ export const DEMO_FLOW: CanvasGraph = {
       id: 'trigger',
       kind: 'trigger',
       position: { x: 0, y: 160 },
-      data: { label: 'Webhook received', event: 'invoice.paid' },
+      data: { label: 'Webhook received' },
     },
     {
       id: 'lookup',

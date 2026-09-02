@@ -15,6 +15,7 @@
 
 import { StepFailure, defaultHandlers, type HandlerRegistry, type StepContext, type StepHandler, type StepResult } from 'automa-durable-runner'
 
+import { canvasHttpHandler } from './steps/http.ts'
 import { transformHandler } from './steps/transform.ts'
 import { branchHandler } from './steps/branch.ts'
 import { emailHandler, smtpFromEnv, type SmtpConfig } from './steps/email.ts'
@@ -211,14 +212,36 @@ export function withMapping(handler: StepHandler, options: MappingOptions = {}):
 }
 
 /**
- * The trigger step: publish what started the run, and do nothing else.
+ * The trigger step: publish what started the run, and almost nothing else.
  *
  * It is a real step rather than a synthetic row so that the ordinary machinery
  * applies to it — it appears in the run viewer, it has a duration, and it can
  * be referred to by later steps the same way any other step can. Its output is
- * the run input verbatim.
+ * the run input, unless `childKey` names a part of it.
+ *
+ * The one input it has. Webhook bodies from real providers are mostly wrapper:
+ * the thing a flow is about sits three levels down, and every later step then
+ * repeats that path in every reference. Naming the path once here makes the
+ * rest of the flow read as though the provider had sent the useful part.
+ *
+ * A `childKey` pointing at nothing fails the step deterministically, rather
+ * than publishing an empty output. Every downstream reference would fail
+ * anyway, one at a time and with the wrong explanation; saying it once, here,
+ * names the actual cause.
  */
-export const triggerHandler: StepHandler = async (context) => ({ output: context.run.input })
+export const triggerHandler: StepHandler = async (context) => {
+  const childKey = String((context.node.config ?? {})['childKey'] ?? '').trim()
+  if (childKey === '') return { output: context.run.input }
+
+  const picked = readPath(context.run.input, childKey)
+  if (picked === undefined) {
+    throw new StepFailure(
+      `the trigger is set to pick off ${JSON.stringify(childKey)}, which is not in the webhook body`,
+      { deterministicallyBroken: true },
+    )
+  }
+  return { output: picked }
+}
 
 /**
  * A step kind that is configured but unavailable.
@@ -254,8 +277,14 @@ export interface HandlerOptions {
 export function mappingHandlers(options: HandlerOptions = {}): HandlerRegistry {
   const smtp = options.smtp === undefined ? smtpFromEnv() : options.smtp
 
+  const engine = defaultHandlers()
+
   const base: Record<string, StepHandler> = {
-    ...defaultHandlers(),
+    ...engine,
+    // The engine's HTTP handler, given the canvas's headers, auth and payload
+    // type. Wrapped rather than replaced: everything that makes the request
+    // safe lives inside it.
+    http: canvasHttpHandler(engine['http']!),
     trigger: triggerHandler,
     transform: transformHandler(),
     branch: branchHandler(),
