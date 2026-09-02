@@ -3,3 +3,6 @@ dist/
 
 # Build output of the editor, which the server reads through CANVAS_DIR.
 packages/automa-flow-canvas/dist/
+
+# Local configuration. Real secrets live here; .env.example is the template.
+.env

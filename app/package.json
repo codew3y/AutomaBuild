@@ -11,12 +11,12 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
-    "db:migrate": "node src/migrate.ts",
-    "start": "node src/server.ts",
-    "demo": "node src/demo.ts",
+    "db:migrate": "node --env-file-if-exists=../.env src/migrate.ts",
+    "start": "node --env-file-if-exists=../.env src/server.ts",
+    "demo": "node --env-file-if-exists=../.env src/demo.ts",
     "test": "node --test \"test/*.test.ts\"",
-    "send": "node scripts/send-webhook.mjs",
-    "smtp:check": "node scripts/smtp-check.mjs"
+    "send": "node --env-file-if-exists=../.env scripts/send-webhook.mjs",
+    "smtp:check": "node --env-file-if-exists=../.env scripts/smtp-check.mjs"
   },
   "dependencies": {
     "automa-durable-runner": "*",

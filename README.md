@@ -69,9 +69,7 @@ npm run build          # the editor's bundle, and each library's dist
 npm run db:up          # two Postgres containers and a mail catcher
 npm run db:migrate     # each library's own migrations, each to its own database
 
-export WEBHOOK_SECRETS=whsec_demo_secret
-export SMTP_HOST=127.0.0.1 SMTP_PORT=1025
-export SMTP_FROM="AutomaBuild <flows@automabuild.test>"
+cp .env.example .env    # then fill it in — at minimum WEBHOOK_SECRETS and the SMTP block
 npm start
 ```
 
