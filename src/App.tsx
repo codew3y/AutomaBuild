@@ -23,6 +23,7 @@ import {
   ReactFlow,
   ReactFlowProvider,
   ViewportPortal,
+  useStore as useFlowStore,
   type Connection,
   type Edge,
   type EdgeChange,
@@ -56,6 +57,21 @@ import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
 import { edgeTypes } from './components/CuttableEdge.tsx'
 import { EMPTY_FLOW, SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
+
+/**
+ * A step card's size, for the places that need it before one exists.
+ *
+ * Taken from `.step-node` in the stylesheet: 13rem wide at the default root
+ * size, and about two lines of padding tall. It is only ever used to *place*
+ * something — nothing is sized from it — so being a few pixels out nudges a
+ * node rather than drawing it wrong. Where a card already exists on screen its
+ * measured size is used instead, and these are the fallback.
+ */
+const NODE_WIDTH = 208
+const NODE_HEIGHT = 44
+
+/** The space between a step and the ghost of the next one. */
+const APPEND_GAP = 56
 
 const graphStore = createGraphStore({ initial: SAMPLE_FLOW })
 const editorStore = createEditorStore()
@@ -462,8 +478,18 @@ function RunHistory({
  */
 function StepLibrary({
   onAdd,
+  onDragKind,
 }: {
   readonly onAdd: (kind: string) => void
+  /**
+   * Which kind is being dragged, or null when nothing is.
+   *
+   * The canvas needs this to know whether to offer anywhere to drop. It cannot
+   * work it out for itself: the payload of a drag is only readable in `drop`,
+   * not in `dragover`, so by the time the canvas can see what is being carried
+   * the gesture is already over.
+   */
+  readonly onDragKind: (kind: string | null) => void
 }) {
   return (
     <aside className="library">
@@ -483,7 +509,12 @@ function StepLibrary({
               onDragStart={(event) => {
                 event.dataTransfer.setData('application/automabuild-step', kind)
                 event.dataTransfer.effectAllowed = 'move'
+                onDragKind(kind)
               }}
+              // Fires whether the drag was dropped or abandoned, which is the
+              // only event that does both. Without it, releasing over the
+              // library would leave the hint on screen for good.
+              onDragEnd={() => onDragKind(null)}
               onClick={() => onAdd(kind)}
               style={{ '--accent': KIND_ACCENT[kind] } as React.CSSProperties}
               title={`Add a ${kind} step`}
@@ -565,6 +596,16 @@ function Editor() {
 
   /** Whether a step is being dragged over the append hint. */
   const [dropHint, setDropHint] = useState(false)
+
+  /**
+   * The kind currently being dragged out of the library, if any.
+   *
+   * The hint used to sit on the canvas permanently, which made it a piece of
+   * furniture rather than an offer — something always there to be ignored,
+   * and one more box to read past when looking at the flow itself. It now
+   * appears for the length of a drag and then goes.
+   */
+  const [dragKind, setDragKind] = useState<string | null>(null)
 
   // The autosave closure is built once and outlives every flow switch, so it
   // reads the current flow through a ref. Capturing flowId directly would have
@@ -1213,6 +1254,40 @@ function Editor() {
     return node
   }, [nodes, edges])
 
+  /**
+   * The tail card's rendered size.
+   *
+   * The hint used to be a fixed 200 by 64 next to a card that is 208 by 44, so
+   * it was both too narrow and too tall — the two never lined up, and the stub
+   * joining them met the card above its handle. React Flow measures every node
+   * it has laid out, so the real numbers are already known and the hint can
+   * simply be the same size as the thing it continues.
+   *
+   * Returned as text rather than an object because this selector runs on every
+   * store change, and a fresh `{ width, height }` each time would compare
+   * unequal to the last one and re-render forever.
+   */
+  const tailSize = useFlowStore(
+    useCallback(
+      (state: { nodeLookup: Map<string, { measured?: { width?: number; height?: number } }> }) => {
+        if (tail === null) return ''
+        const measured = state.nodeLookup.get(tail.id)?.measured
+        if (measured?.width === undefined || measured.height === undefined) return ''
+        return `${measured.width}x${measured.height}`
+      },
+      [tail],
+    ),
+  )
+
+  /** The slot the next step would occupy: the hint draws it, and a drop fills it. */
+  const appendSlot = useMemo(() => {
+    if (tail === null) return null
+    const [w, h] = tailSize === '' ? [NODE_WIDTH, NODE_HEIGHT] : tailSize.split('x').map(Number)
+    const width = w ?? NODE_WIDTH
+    const height = h ?? NODE_HEIGHT
+    return { x: tail.position.x + width + APPEND_GAP, y: tail.position.y, width, height }
+  }, [tail, tailSize])
+
   const addStep = useCallback((kind: string, position?: { x: number; y: number }) => {
     const id = `${kind}-${Math.random().toString(36).slice(2, 7)}`
     graphStore.getState().addNode({
@@ -1238,12 +1313,15 @@ function Editor() {
    */
   const appendStep = useCallback(
     (kind: string) => {
-      if (tail === null) return
-      const id = addStep(kind, { x: tail.position.x + 260, y: tail.position.y })
+      if (tail === null || appendSlot === null) return
+      // Exactly where the ghost was drawn, so the card does not appear to jump
+      // the moment it becomes real.
+      const id = addStep(kind, { x: appendSlot.x, y: appendSlot.y })
       graphStore.getState().connect({ source: tail.id, target: id })
       graphStore.endGesture()
+      setDragKind(null)
     },
-    [tail, addStep],
+    [tail, appendSlot, addStep],
   )
 
   const onDrop = useCallback(
@@ -1254,7 +1332,14 @@ function Editor() {
       const kind = event.dataTransfer.getData('application/automabuild-step')
       // Anything else dragged in — a file, a text selection — is not ours.
       if (kind === '' || !STEP_KINDS.includes(kind as (typeof STEP_KINDS)[number])) return
-      addStep(kind, screenToFlowPosition({ x: event.clientX, y: event.clientY }))
+
+      // A node's position is its top-left corner, so passing the cursor
+      // straight through put the corner under the pointer and the card itself
+      // down and to the right of it — far enough, at 208 by 44, to look like
+      // the drop had landed somewhere else entirely. Half the card is
+      // subtracted so it arrives centred on where it was let go.
+      const at = screenToFlowPosition({ x: event.clientX, y: event.clientY })
+      addStep(kind, { x: at.x - NODE_WIDTH / 2, y: at.y - NODE_HEIGHT / 2 })
     },
     [addStep, screenToFlowPosition, viewing],
   )
@@ -1593,7 +1678,7 @@ function Editor() {
             now={renderedAt}
           />
         ) : (
-          <StepLibrary onAdd={addStep} />
+          <StepLibrary onAdd={addStep} onDragKind={setDragKind} />
         )}
 
         <ReactFlow
@@ -1629,34 +1714,51 @@ function Editor() {
           open space. Hidden while reading a run, and hidden for a branch,
           which has two ends and therefore no single "next".
         */}
-        {!viewing && tail !== null && (
+        {/*
+          Where the next step would go, shown only while one is being carried.
+
+          A ghost of the card that would appear there, rather than a plus
+          button: it says what will happen and where, and dropping onto it
+          connects — which is the step everyone forgets after adding a node in
+          open space. It appears for the length of a drag and then goes, so it
+          is an offer rather than a permanent piece of furniture.
+
+          Hidden while reading a run, and hidden for a branch, which has two
+          ends and therefore no single "next".
+        */}
+        {!viewing && dragKind !== null && appendSlot !== null && (
           <ViewportPortal>
-          <div
-            className={dropHint ? 'append-hint over' : 'append-hint'}
-            style={
-              {
-                '--x': `${tail.position.x + 260}px`,
-                '--y': `${tail.position.y}px`,
-              } as React.CSSProperties
-            }
-            onDragOver={(event) => {
-              event.preventDefault()
-              event.stopPropagation()
-              setDropHint(true)
-            }}
-            onDragLeave={() => setDropHint(false)}
-            onDrop={(event) => {
-              event.preventDefault()
-              event.stopPropagation()
-              setDropHint(false)
-              const kind = event.dataTransfer.getData('application/automabuild-step')
-              if (kind === '' || !STEP_KINDS.includes(kind as (typeof STEP_KINDS)[number])) return
-              appendStep(kind)
-            }}
-          >
-            <span className="append-hint-plus" aria-hidden="true">+</span>
-            <span className="append-hint-text">Drop here to continue the flow</span>
-          </div>
+            <div
+              className={dropHint ? 'append-hint over' : 'append-hint'}
+              style={
+                {
+                  '--x': `${appendSlot.x}px`,
+                  '--y': `${appendSlot.y}px`,
+                  '--w': `${appendSlot.width}px`,
+                  '--h': `${appendSlot.height}px`,
+                  '--gap': `${APPEND_GAP}px`,
+                } as React.CSSProperties
+              }
+              onDragOver={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                setDropHint(true)
+              }}
+              onDragLeave={() => setDropHint(false)}
+              onDrop={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                setDropHint(false)
+                const kind = event.dataTransfer.getData('application/automabuild-step')
+                if (kind === '' || !STEP_KINDS.includes(kind as (typeof STEP_KINDS)[number])) return
+                appendStep(kind)
+              }}
+            >
+              <span className="append-hint-plus" aria-hidden="true">
+                +
+              </span>
+              <span className="append-hint-text">Drop to connect</span>
+            </div>
           </ViewportPortal>
         )}
 

@@ -1083,26 +1083,33 @@ button.danger.inline { width: auto; margin-top: 0; }
   zooms with the graph the way a real node would — a hint that stayed put
   while the canvas moved would point at nothing.
 */
+/*
+  Sized and laid out as a step card, because that is what it is a ghost of.
+
+  It was a fixed 200 by 64 next to a card that is 208 by 44, so it lined up
+  with nothing and the stub joining them met the card above its handle. The
+  width and height now come in as custom properties, measured from the card it
+  follows, and the row layout mirrors `.step-node` exactly — same gap, same
+  padding, same radius — so the two read as the same kind of object.
+*/
 .append-hint {
   position: absolute;
   left: var(--x);
   top: var(--y);
-  width: 200px;
-  min-height: 64px;
+  width: var(--w);
+  height: var(--h);
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  padding: 12px;
+  gap: .6rem;
+  padding: .6rem .75rem;
   box-sizing: border-box;
   border: 1.5px dashed var(--line-strong);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--surface) 55%, transparent);
   color: var(--muted);
-  text-align: center;
-  opacity: 0.65;
-  transition: opacity 120ms, border-color 120ms, background 120ms, transform 120ms;
+  opacity: .75;
+  transition: opacity 120ms, border-color 120ms, background 120ms, color 120ms;
 }
 
 .append-hint.over {
@@ -1111,21 +1118,28 @@ button.danger.inline { width: auto; margin-top: 0; }
   border-style: solid;
   background: var(--accent-soft);
   color: var(--accent);
-  transform: scale(1.02);
 }
 
-.append-hint-plus { font-size: 18px; line-height: 1; }
-.append-hint-text { font-size: 11px; line-height: 1.3; }
+.append-hint-plus { font-size: 1rem; line-height: 1; }
+.append-hint-text { font-size: .75rem; white-space: nowrap; }
 
-/* A dashed stub from the last step to the hint, so the two read as joined. */
+/*
+  A dashed stub from the last step to the hint, so the two read as joined.
+
+  Spans exactly the gap the hint was placed at, and sits on the vertical
+  centre — which is the same line the card's handles sit on, now that the two
+  are the same height.
+*/
 .append-hint::before {
   content: '';
   position: absolute;
   right: 100%;
   top: 50%;
-  width: 60px;
+  width: var(--gap);
   border-top: 1.5px dashed var(--line-strong);
 }
+
+.append-hint.over::before { border-color: var(--accent); }
 
 /*
   The controls that sit on an edge.
