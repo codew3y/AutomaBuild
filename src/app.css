@@ -1185,3 +1185,17 @@ button.danger.inline { width: auto; margin-top: 0; }
 }
 
 .edge-hit { pointer-events: stroke; cursor: pointer; }
+
+/*
+  The line under a field.
+
+  Small and quiet: it is there to be found when someone is unsure what a field
+  wants, not to compete with the field itself. Given a max width so a long hint
+  wraps into a readable column rather than one long line across the panel.
+*/
+.field-hint {
+  font-size: .7rem;
+  line-height: 1.4;
+  margin-top: .1rem;
+  max-width: 46ch;
+}

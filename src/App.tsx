@@ -2142,8 +2142,12 @@ function StepForm({
         <Field
           key={field}
           label={field}
+          display={schema?.labels?.[field] ?? field}
           value={String(data[field] ?? '')}
           multiline={schema?.multiline?.includes(field) ?? false}
+          choices={schema?.choices?.[field]}
+          hint={schema?.hints?.[field]}
+          placeholder={schema?.placeholders?.[field]}
           nodeId={nodeId}
           onCommit={(value) => {
             graphStore.getState().updateNodeData(nodeId, { [field]: value })
@@ -2164,14 +2168,26 @@ function StepForm({
  */
 function Field({
   label,
+  display,
   value,
   multiline = false,
+  choices,
+  hint,
+  placeholder,
   nodeId,
   onCommit,
 }: {
+  /** The config key. What gets written into the flow, and what mapping targets. */
   label: string
+  /** What the key is called on screen, when that differs. */
+  display?: string
   value: string
   multiline?: boolean
+  /** When present, the field is a menu rather than a text box. */
+  choices?: readonly string[]
+  /** A line under the field saying what belongs in it. */
+  hint?: string
+  placeholder?: string
   /** Set only inside the setup dialog, where a mapping click can target it. */
   nodeId?: string
   onCommit: (value: string) => void
@@ -2201,8 +2217,37 @@ function Field({
 
   return (
     <label className="field">
-      <span>{label}</span>
-      {multiline ? (
+      <span>{display ?? label}</span>
+
+      {choices !== undefined ? (
+        /*
+          A menu commits on change rather than on blur.
+
+          The blur rule exists so that typing does not put every keystroke in
+          the undo stack. Choosing from a menu is one act already, and waiting
+          for a blur to record it means clicking elsewhere to make a choice
+          stick — which nobody expects and no other menu does.
+
+          The empty option is what "not set" looks like. Without it a method
+          field would read GET before anyone chose GET, and the flow would be
+          saved with a value its author never picked.
+        */
+        <select
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.target.value)
+            if (event.target.value !== value) onCommit(event.target.value)
+          }}
+          onFocus={claimFocus}
+        >
+          <option value="">—</option>
+          {choices.map((choice) => (
+            <option key={choice} value={choice}>
+              {choice}
+            </option>
+          ))}
+        </select>
+      ) : multiline ? (
         <textarea
           value={draft}
           rows={5}
@@ -2210,7 +2255,7 @@ function Field({
           onBlur={commit}
           onFocus={claimFocus}
           onKeyDown={onKeyDown}
-          placeholder="Hi {{ steps.fetch.output.name }},…"
+          placeholder={placeholder ?? 'Hi {{ steps.fetch.output.name }},…'}
         />
       ) : (
         <input
@@ -2219,9 +2264,14 @@ function Field({
           onBlur={commit}
           onFocus={claimFocus}
           onKeyDown={onKeyDown}
-          placeholder={label === 'url' ? 'https://…  or  {{ steps.x.output.url }}' : ''}
+          placeholder={placeholder ?? ''}
         />
       )}
+
+      {/* Under the field rather than in a tooltip: these say things that are
+          otherwise only discoverable by publishing a flow and watching it
+          fail, and a tooltip is only read by someone who already suspects. */}
+      {hint !== undefined && <small className="field-hint muted">{hint}</small>}
     </label>
   )
 }

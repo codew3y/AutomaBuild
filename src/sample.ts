@@ -31,26 +31,127 @@ export interface StepSchema {
    * the guess is wrong in a way nobody can configure their way out of.
    */
   readonly multiline?: readonly string[]
+  /**
+   * Fields with a fixed set of answers, rendered as a menu.
+   *
+   * A method is one of five things and a payload type one of three. Typed into
+   * a text field, they are five and three ways to make a typo that surfaces
+   * only as a failed run — `POSt` is not a method, and nothing says so until
+   * the request goes out.
+   */
+  readonly choices?: Readonly<Record<string, readonly string[]>>
+  /**
+   * A friendlier name than the config key.
+   *
+   * `replyTo` is what the handler wants and "reply to" is what it is called.
+   * Only the display changes; the key written into the flow is unchanged.
+   */
+  readonly labels?: Readonly<Record<string, string>>
+  /**
+   * A line under the field saying what goes in it.
+   *
+   * These carry the things that are otherwise only discoverable by failing:
+   * that headers are one per line, that a body must be valid JSON unless the
+   * payload type says otherwise, which words a condition accepts.
+   */
+  readonly hints?: Readonly<Record<string, string>>
+  /** Placeholder text, for a field whose shape is easier shown than described. */
+  readonly placeholders?: Readonly<Record<string, string>>
 }
 
 export const SCHEMAS: Record<string, StepSchema> = {
-  trigger: { fields: ['event'], label: 'Trigger' },
-  http: { fields: ['url', 'method'], required: ['url'], label: 'HTTP request' },
+  trigger: {
+    // Was `event`, which nothing read: it was declared here, shown in the
+    // setup dialog, saved into every published flow, and consulted by no code
+    // anywhere. A field that does nothing is worse than a missing one, because
+    // people fill it in and then reason about a flow as though it mattered.
+    //
+    // Replaced with the one input a webhook trigger actually has, which is
+    // also the only one Zapier's Catch Hook offers: a path into the body, for
+    // when the interesting part is nested inside a wrapper.
+    fields: ['childKey'],
+    label: 'Trigger',
+    labels: { childKey: 'pick off a child key' },
+    placeholders: { childKey: 'data.order' },
+    hints: {
+      childKey:
+        'Optional. Leave empty to use the whole webhook body. Set it to a path ' +
+        'like data.order and the step outputs just that part, so later steps can ' +
+        'say {{ trigger.body.id }} instead of {{ trigger.body.data.order.id }}.',
+    },
+  },
+
+  http: {
+    fields: ['url', 'method', 'auth', 'headers', 'payload', 'body'],
+    required: ['url'],
+    label: 'HTTP request',
+    multiline: ['headers', 'body'],
+    choices: {
+      method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+      payload: ['json', 'form', 'raw'],
+    },
+    labels: { payload: 'payload type' },
+    placeholders: {
+      url: 'https://…  or  {{ steps.x.output.url }}',
+      auth: 'Bearer {{ steps.login.output.token }}',
+      headers: 'Accept: application/json',
+      body: '{ "total": {{ steps.order.output.total }} }',
+    },
+    hints: {
+      auth:
+        'Optional. Write it as the header does: "Bearer <token>", or ' +
+        '"Basic user:password" — the base64 is done for you.',
+      headers: 'One per line, as "Name: value". Blank lines and # comments are ignored.',
+      payload:
+        'json validates the body and sends it as application/json. form turns ' +
+        'name=value lines into a form post. raw sends exactly what you typed.',
+      body: 'Ignored on GET, HEAD and DELETE.',
+    },
+  },
+
   transform: {
     fields: ['template'],
     required: ['template'],
     label: 'Transform',
     multiline: ['template'],
+    hints: {
+      template:
+        'A JSON document. Values may be references, and a value that is only a ' +
+        'reference keeps its type — 42 stays a number.',
+    },
   },
-  branch: { fields: ['condition'], required: ['condition'], label: 'Branch' },
+
+  branch: {
+    fields: ['condition'],
+    required: ['condition'],
+    label: 'Branch',
+    placeholders: { condition: '{{ steps.order.output.total }} >= 100' },
+    hints: {
+      condition:
+        'Compare with = != > < >= <=, or with the words contains, starts with, ' +
+        'ends with, is in, exists (and their "does not" forms). Join with and / or.',
+    },
+  },
+
   email: {
     // `from` is optional and falls back to the server's SMTP_FROM. It is listed
     // first because it is the field someone changes once per flow and then
-    // leaves alone, unlike the three below it.
-    fields: ['from', 'to', 'subject', 'body'],
+    // leaves alone, unlike the ones below it.
+    //
+    // `cc` and `replyTo` were supported by the handler from the start and
+    // simply never offered here, so the only way to reach them was to publish
+    // a flow by hand.
+    fields: ['from', 'to', 'cc', 'replyTo', 'subject', 'body'],
     required: ['to', 'body'],
     label: 'Send email',
     multiline: ['body'],
+    labels: { replyTo: 'reply to' },
+    placeholders: { to: 'ada@example.com, grace@example.com' },
+    hints: {
+      from: 'Optional. Falls back to the server’s configured sender.',
+      to: 'One or more addresses, separated by commas.',
+      replyTo: 'Optional. Where replies go, when that is not the sender.',
+    },
   },
 }
 
@@ -87,7 +188,7 @@ export const SAMPLE_FLOW: FlowGraph = {
       id: 'trigger',
       kind: 'trigger',
       position: { x: 0, y: 160 },
-      data: { label: 'Webhook received', event: 'invoice.paid' },
+      data: { label: 'Webhook received' },
     },
     {
       id: 'lookup',
@@ -150,7 +251,7 @@ export const SAMPLE_FLOW: FlowGraph = {
  */
 export const BRANCHED_SAMPLE: FlowGraph = {
   nodes: [
-    { id: 'trigger', kind: 'trigger', position: { x: 0, y: 160 }, data: { label: 'Webhook received', event: 'invoice.paid' } },
+    { id: 'trigger', kind: 'trigger', position: { x: 0, y: 160 }, data: { label: 'Webhook received' } },
     { id: 'fetch', kind: 'http', position: { x: 220, y: 160 }, data: { label: 'Fetch customer', url: 'https://api.example.com/customers/1', method: 'GET' } },
     { id: 'check', kind: 'branch', position: { x: 460, y: 160 }, data: { label: 'Is premium?', condition: '{{ steps.fetch.output.tier }} = "premium"' } },
     { id: 'thanks', kind: 'email', position: { x: 700, y: 60 }, data: { label: 'Thank-you email', to: '{{ steps.fetch.output.email }}', subject: 'Thanks!', body: `Hi {{ steps.fetch.output.name }},\n\nThanks for upgrading — your premium features are live.` } },
