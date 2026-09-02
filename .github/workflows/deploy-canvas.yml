@@ -1,14 +1,23 @@
-# Deploys the built app to GitHub Pages.
+# Deploys the built editor to GitHub Pages.
 #
 # Publishes to a `gh-pages` branch rather than uploading a Pages artifact.
 # Artifact storage is an account-wide quota that other repositories share, and
 # when it fills, an artifact-based deploy fails for a reason that has nothing
 # to do with this project. A branch has no such limit.
-name: Deploy
+#
+# Relocated from automa-flow-canvas's own repository when the five were merged.
+# The git steps still work unchanged: `--work-tree dist` is resolved against
+# the working directory, which is the package, so it means the editor's own
+# build output and not a `dist` at the root.
+name: Deploy canvas
 
 on:
   push:
     branches: [main]
+    paths:
+      - packages/automa-flow-canvas/**
+      - package-lock.json
+      - .github/workflows/deploy-canvas.yml
   workflow_dispatch:
 
 permissions:
@@ -21,13 +30,20 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/automa-flow-canvas
+
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
+      # One install, at the root, for the whole workspace.
       - run: npm ci
+        working-directory: .
+
       - run: npm run build
 
       # Pages serves the branch as-is and would otherwise try to run the

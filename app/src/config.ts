@@ -99,7 +99,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // The canvas is built separately and served from here. Pointing at a
     // directory that is not there is a startup error rather than a 404 per
     // request, because a UI that silently does not exist is hard to notice.
-    canvasDir: env.CANVAS_DIR ?? '../../automa-flow-canvas/dist',
+    //
+    // A sibling workspace package now, rather than a sibling checkout. It used
+    // to be `../../automa-flow-canvas/dist`, which only resolved if the editor
+    // happened to be cloned next to this repository — the one piece of the
+    // system that could not be obtained by cloning it.
+    canvasDir: env.CANVAS_DIR ?? '../packages/automa-flow-canvas/dist',
     // Two databases, because the gate and the engine are two independent
     // libraries with their own migrations. They can point at the same
     // Postgres — and by default they do, on separate ports in compose — but

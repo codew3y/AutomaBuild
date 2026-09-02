@@ -786,7 +786,7 @@ async function registerCanvas(app: FastifyInstance, config: AppConfig): Promise<
   if (!existsSync(root)) {
     console.warn(
       `The canvas is not built. Expected ${root}.\n` +
-        `Run \`npm run build\` in automa-flow-canvas, or set CANVAS_DIR.\n` +
+        `Run \`npm run build\` at the repository root, or set CANVAS_DIR.\n` +
         `The API still works; only the UI is missing.`,
     )
     return

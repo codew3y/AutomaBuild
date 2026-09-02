@@ -1,10 +1,31 @@
-name: CI
+# flow-canvas
+#
+# Relocated from automa-flow-canvas's own repository when the five were merged into one.
+# The job body is unchanged apart from three things, because the Postgres
+# services and the skip-detection here were worth keeping exactly as they were:
+#
+#   - `defaults.run.working-directory` puts every step in the package, so the
+#     scripts, the compose files and the relative paths all still resolve.
+#   - the install step overrides that back to the repository root, because in a
+#     workspace there is one install and one lockfile and they live there.
+#   - a `paths` filter, so a change to the editor does not rerun the engine's
+#     database matrix. Five suites on every push to one repository is how a
+#     green tick stops being read.
+name: flow-canvas
 
 on:
   push:
     branches: [main]
+    paths:
+      - packages/automa-flow-canvas/**
+      - package-lock.json
+      - .github/workflows/ci-flow-canvas.yml
   pull_request:
     branches: [main]
+    paths:
+      - packages/automa-flow-canvas/**
+      - package-lock.json
+      - .github/workflows/ci-flow-canvas.yml
 
 permissions:
   contents: read
@@ -13,6 +34,9 @@ jobs:
   test:
     name: test (node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/automa-flow-canvas
     strategy:
       fail-fast: false
       matrix:
@@ -22,7 +46,9 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
+      # One install, at the root, for the whole workspace.
       - run: npm ci
+        working-directory: .
       - run: npm run typecheck
       - run: npm test
 
@@ -32,12 +58,17 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/automa-flow-canvas
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
+      # One install, at the root, for the whole workspace.
       - run: npm ci
+        working-directory: .
       - run: npm run build
       - name: check the bundle actually contains the app
         run: |

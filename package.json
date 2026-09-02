@@ -1,0 +1,31 @@
+{
+  "name": "automabuild",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AutomaBuild: the four components and the application that composes them, in one repository.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "workspaces": [
+    "app",
+    "packages/*"
+  ],
+  "scripts": {
+    "//": "Every script runs across the workspace. A change in one component is meant to be provable from the root, in one command, without knowing which folder it landed in.",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "//prepare": "npm runs workspace lifecycle scripts alphabetically, which put the runner before the safe-fetch it compiles against. Dependency order is stated here instead, once, where it can be read.",
+    "prepare": "npm run build --workspace automa-safe-fetch && npm run build --workspace automa-durable-runner && npm run build --workspace automa-webhook-gate",
+    "//app": "The application, addressed from the root so nobody has to cd first.",
+    "start": "npm start --workspace app",
+    "db:up": "npm run db:up --workspace app",
+    "db:down": "npm run db:down --workspace app",
+    "db:migrate": "npm run db:migrate --workspace app",
+    "send": "npm run send --workspace app",
+    "//editor": "The editor is a Vite app, and dev is the only way to run it in watch mode.",
+    "dev": "npm run dev --workspace automa-flow-canvas"
+  }
+}

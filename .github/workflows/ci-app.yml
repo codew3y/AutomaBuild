@@ -1,4 +1,9 @@
-name: CI
+# The seam: the four components composed into one running system.
+#
+# This is the only job that proves the parts fit. Each component's own workflow
+# proves the component; none of them can prove the join, which is where the
+# interesting failures were.
+name: app
 
 on:
   push:
@@ -23,11 +28,20 @@ jobs:
         with:
           node-version: '24'
 
-      # No lockfile commit: the three components are installed from their
-      # default branches on purpose, so this build is what catches a change in
-      # one of them breaking the join. That is the entire reason this workflow
-      # exists — a green component repository proves nothing about the seam.
-      - run: npm install
+      # One install, at the root, for the whole workspace.
+      #
+      # It used to be a deliberately lockfile-free `npm install`, because the
+      # components came from their default branches and this job existed to
+      # catch one of them breaking the join. They are workspace packages now:
+      # there is no upstream to drift, the join is whatever is in this commit,
+      # and the lockfile is committed like anywhere else.
+      - run: npm ci
+        working-directory: .
+
+      # The editor is served from disk by the server under test, so it has to
+      # exist before the demo runs.
+      - run: npm run build --workspace automa-flow-canvas
+        working-directory: .
 
       - run: npm run typecheck
       - run: npm test

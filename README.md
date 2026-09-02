@@ -3,11 +3,13 @@
 A multi-tenant workflow automation platform, built as four independent
 components and one application that joins them.
 
-Each component is its own repository and stands on its own — the HTTP client is
-published to npm and has no idea a workflow engine exists. `app/` is where they
-meet, and it is deliberately thin: about six hundred lines, most of which is
-translation between two vocabularies that were designed separately and had to
-be made to agree.
+Each component was developed as its own repository and still stands on its own —
+the HTTP client is published to npm and has no idea a workflow engine exists.
+They live here as workspace packages now, so the whole system can be read,
+built and tested from one clone. `app/` is where they meet, and it is
+deliberately thin: about six hundred lines, most of which is translation
+between two vocabularies that were designed separately and had to be made to
+agree.
 
 ```
   a signed webhook
@@ -27,10 +29,30 @@ be made to agree.
 
 | Component | What it is | Where |
 |---|---|---|
-| **A** | `automa-safe-fetch` — an SSRF-hardened HTTP client. Resolves, validates every address, and pins the connection to the one it checked. Zero dependencies. | [npm](https://www.npmjs.com/package/automa-safe-fetch) · [repo](https://github.com/codew3y/automa-safe-fetch) |
-| **B** | `automa-webhook-gate` — signature verification for Stripe, GitHub, Slack and Standard Webhooks, with a Postgres-backed replay store. | [repo](https://github.com/codew3y/automa-webhook-gate) |
-| **C** | `automa-durable-runner` — a durable execution engine. Leases, at-least-once delivery with idempotent effects, partitioned tables, a janitor, a DLQ. | [repo](https://github.com/codew3y/automa-durable-runner) |
-| **D** | `automa-flow-canvas` — the React Flow editor: build a flow, map fields between steps, read the history of what ran. | [repo](https://github.com/codew3y/automa-flow-canvas) · [live](https://codew3y.github.io/automa-flow-canvas/) |
+| **A** | `automa-safe-fetch` — an SSRF-hardened HTTP client. Resolves, validates every address, and pins the connection to the one it checked. Zero dependencies. | [`packages/automa-safe-fetch`](packages/automa-safe-fetch) · [npm](https://www.npmjs.com/package/automa-safe-fetch) |
+| **B** | `automa-webhook-gate` — signature verification for Stripe, GitHub, Slack and Standard Webhooks, with a Postgres-backed replay store. | [`packages/automa-webhook-gate`](packages/automa-webhook-gate) |
+| **C** | `automa-durable-runner` — a durable execution engine. Leases, at-least-once delivery with idempotent effects, partitioned tables, a janitor, a DLQ. | [`packages/automa-durable-runner`](packages/automa-durable-runner) |
+| **D** | `automa-flow-canvas` — the React Flow editor: build a flow, map fields between steps, read the history of what ran. | [`packages/automa-flow-canvas`](packages/automa-flow-canvas) · [live](https://codew3y.github.io/automa-flow-canvas/) |
+
+Each package keeps its own README, tests and CI. They were four repositories
+until they were merged here with `git subtree`, so every component's history is
+in this one — `git log -- packages/automa-durable-runner` reaches the commits
+that built it.
+
+## Layout
+
+```
+app/                              the join: HTTP surface, step handlers, flow compiler
+packages/automa-safe-fetch/       A — the HTTP client
+packages/automa-webhook-gate/     B — signature verification and the replay store
+packages/automa-durable-runner/   C — the execution engine
+packages/automa-flow-canvas/      D — the editor
+```
+
+`npm test`, `npm run typecheck`, `npm run build` and `npm run lint` at the root
+run across all five. The server serves the editor from
+`packages/automa-flow-canvas/dist`, so `npm run build` has to have run before
+`npm start` shows a UI — it says so on startup if it has not.
 
 The engineering plan that all of this was built against is in
 [`autobuild-engineering-plan.md`](autobuild-engineering-plan.md), including two
@@ -38,11 +60,12 @@ dated corrections where the plan turned out to be wrong.
 
 ## Running it
 
-Docker and Node 22.18+ (or 24) are the only requirements.
+Docker and Node 22.18+ (or 24) are the only requirements. Everything is driven
+from the repository root; no `cd` into a package is needed.
 
 ```bash
-cd app
-npm install
+npm install            # one install for the whole workspace
+npm run build          # the editor's bundle, and each library's dist
 npm run db:up          # two Postgres containers and a mail catcher
 npm run db:migrate     # each library's own migrations, each to its own database
 
@@ -59,7 +82,7 @@ under **History**, and see what the email steps produced at
 To see the whole path exercised and asserted:
 
 ```bash
-npm run demo
+npm run demo --workspace app
 ```
 
 which publishes a flow, sends a forged delivery, a stale one, a genuine one, and

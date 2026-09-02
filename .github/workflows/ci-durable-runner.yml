@@ -1,10 +1,31 @@
-name: CI
+# durable-runner
+#
+# Relocated from automa-durable-runner's own repository when the five were merged into one.
+# The job body is unchanged apart from three things, because the Postgres
+# services and the skip-detection here were worth keeping exactly as they were:
+#
+#   - `defaults.run.working-directory` puts every step in the package, so the
+#     scripts, the compose files and the relative paths all still resolve.
+#   - the install step overrides that back to the repository root, because in a
+#     workspace there is one install and one lockfile and they live there.
+#   - a `paths` filter, so a change to the editor does not rerun the engine's
+#     database matrix. Five suites on every push to one repository is how a
+#     green tick stops being read.
+name: durable-runner
 
 on:
   push:
     branches: [main]
+    paths:
+      - packages/automa-durable-runner/**
+      - package-lock.json
+      - .github/workflows/ci-durable-runner.yml
   pull_request:
     branches: [main]
+    paths:
+      - packages/automa-durable-runner/**
+      - package-lock.json
+      - .github/workflows/ci-durable-runner.yml
 
 permissions:
   contents: read
@@ -13,6 +34,9 @@ jobs:
   test:
     name: test (node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/automa-durable-runner
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +50,9 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      # One install, at the root, for the whole workspace.
       - run: npm ci
+        working-directory: .
       - run: npm run typecheck
       - run: npm run build
 
@@ -70,13 +96,18 @@ jobs:
   chaos:
     name: chaos demo
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/automa-durable-runner
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
+      # One install, at the root, for the whole workspace.
       - run: npm ci
+        working-directory: .
       - run: docker compose up -d --build
 
       - name: wait for postgres

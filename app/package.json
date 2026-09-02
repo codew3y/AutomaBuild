@@ -19,9 +19,9 @@
     "smtp:check": "node scripts/smtp-check.mjs"
   },
   "dependencies": {
-    "automa-durable-runner": "github:codew3y/automa-durable-runner",
+    "automa-durable-runner": "*",
     "automa-safe-fetch": "^0.1.1",
-    "automa-webhook-gate": "github:codew3y/automa-webhook-gate",
+    "automa-webhook-gate": "*",
     "fastify": "^5.12.1",
     "nodemailer": "^9.0.5",
     "pg": "^8.16.3"

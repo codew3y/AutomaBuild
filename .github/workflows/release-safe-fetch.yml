@@ -1,4 +1,4 @@
-# Publishes to npm on a pushed tag, via trusted publishing (OIDC).
+# Publishes automa-safe-fetch to npm on a pushed tag, via trusted publishing (OIDC).
 #
 # There is no npm token. GitHub mints a short-lived OIDC token that npm
 # verifies against the trusted publisher configured on the package — this
@@ -11,13 +11,32 @@
 # Provenance is signed from the same identity, linking the published tarball to
 # this workflow run and this commit.
 #
-# Requires: `id-token: write`, npm >= 11.5.1 (Node 24 ships 11.x), and a trusted
-# publisher registered at npmjs.com for codew3y/automa-safe-fetch → release.yml.
-name: Release
+# ---------------------------------------------------------------------------
+# THIS NEEDS A ONE-TIME CHANGE AT NPMJS.COM BEFORE IT CAN PUBLISH AGAIN.
+#
+# The trusted publisher was registered against the old repository and its old
+# workflow filename:
+#
+#     codew3y/automa-safe-fetch  →  release.yml
+#
+# It must be re-registered as:
+#
+#     codew3y/AutomaBuild        →  release-safe-fetch.yml
+#
+# npmjs.com → the package → Settings → Trusted Publisher. Until that is
+# changed, the publish step fails with a 404 that reads like a missing package
+# rather than a rejected identity. Nothing else here needs touching.
+# ---------------------------------------------------------------------------
+#
+# Tags are package-qualified: `automa-safe-fetch-v0.1.2`, not `v0.1.2`. In a
+# repository holding five things, a bare version tag does not say what it is
+# the version of — and the moment a second package publishes, it would be
+# ambiguous rather than merely unclear.
+name: Release safe-fetch
 
 on:
   push:
-    tags: ['v*']
+    tags: ['automa-safe-fetch-v*']
 
 permissions:
   contents: read
@@ -26,6 +45,10 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/automa-safe-fetch
+
     steps:
       - uses: actions/checkout@v7
 
@@ -34,7 +57,7 @@ jobs:
       # 0.1.0, and npm unpublishing is a 72-hour window at best.
       - name: Check the tag matches package.json
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${GITHUB_REF_NAME#automa-safe-fetch-v}"
           PKG="$(node -p "require('./package.json').version")"
           if [ "$TAG" != "$PKG" ]; then
             echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG}"
@@ -63,10 +86,18 @@ jobs:
             echo "No _authToken line present in ${NPMRC:-<none>}"
           fi
 
+      # One install, at the root, for the whole workspace.
       - run: npm ci
+        working-directory: .
+
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
 
       # No NODE_AUTH_TOKEN. Authentication is the OIDC token above.
-      - run: npm publish --provenance --access public
+      #
+      # `--workspaces false` keeps npm from treating this as a workspace-wide
+      # publish: run inside a workspace package, npm would otherwise consider
+      # every package a candidate, and the other four are either private or
+      # not meant for the registry.
+      - run: npm publish --provenance --access public --workspaces false
