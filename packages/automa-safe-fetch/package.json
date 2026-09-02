@@ -1,6 +1,6 @@
 {
   "name": "automa-safe-fetch",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "An HTTP client for applications that fetch user-supplied URLs, without letting those users reach the inside of your network. SSRF defence: resolve, validate, pin.",
   "keywords": [
     "ssrf",
