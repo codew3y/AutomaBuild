@@ -1,27 +1,26 @@
 /**
- * Light, dark, or the system.
+ * Light or dark, and nothing in between.
  *
- * The failure this guards against is a toggle that works in one direction:
- * an explicit "light" that a dark system overrides, or an explicit "dark" that
- * a light system ignores. Both look fine on whichever machine they were built
- * on and are broken on the other.
+ * The state that used to exist here — "follow the system" — is gone, so the
+ * thing worth testing changed with it. It is no longer that an explicit choice
+ * beats the opposite system setting; it is that the choice is always explicit,
+ * always written down, and never quietly handed back to the system.
  */
 
 import { test, describe, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { applyTheme, nextTheme, readTheme, themeLabel, type Theme } from '../src/core/theme.ts'
+import { applyTheme, nextTheme, readTheme, systemTheme, themeLabel } from '../src/core/theme.ts'
 
-/** The two globals the module touches, replaced with something inspectable. */
-function stubDom(prefersDark: boolean) {
+function stubDom(prefersDark: boolean, stored?: string) {
   const attributes = new Map<string, string>()
   const store = new Map<string, string>()
+  if (stored !== undefined) store.set('automa-flow-canvas:theme', stored)
 
   globalThis.document = {
     documentElement: {
       setAttribute: (name: string, value: string) => void attributes.set(name, value),
       removeAttribute: (name: string) => void attributes.delete(name),
-      getAttribute: (name: string) => attributes.get(name) ?? null,
     },
   } as unknown as Document
 
@@ -40,8 +39,11 @@ function stubDom(prefersDark: boolean) {
 
 beforeEach(() => stubDom(false))
 
-describe('applying a theme', () => {
-  test('an explicit choice is stamped on the root', () => {
+describe('choosing a theme', () => {
+  test('the attribute is always set, never removed', () => {
+    // With no system state there is nothing an absent attribute could mean, and
+    // leaving it off would hand control back to prefers-color-scheme — the
+    // behaviour this deliberately drops.
     const { attributes } = stubDom(true)
     applyTheme('light')
     assert.equal(attributes.get('data-theme'), 'light')
@@ -49,69 +51,55 @@ describe('applying a theme', () => {
     assert.equal(attributes.get('data-theme'), 'dark')
   })
 
-  test('system removes the attribute rather than setting a third value', () => {
-    // The stylesheet keys off the attribute being absent, so a value of
-    // "system" would match nothing and leave the page on whatever was last set.
-    const { attributes } = stubDom(false)
-    applyTheme('dark')
-    applyTheme('system')
-    assert.equal(attributes.has('data-theme'), false)
+  test('the choice survives a reload', () => {
+    const { store } = stubDom(true)
+    applyTheme('light')
+    assert.equal(store.get('automa-flow-canvas:theme'), 'light')
+    assert.equal(readTheme(), 'light')
   })
 
-  test('an explicit choice survives a reload', () => {
-    const { store } = stubDom(false)
-    applyTheme('dark')
-    assert.equal(store.get('automa-flow-canvas:theme'), 'dark')
+  test('a stored choice wins over the system', () => {
+    // The whole point of dropping the system state: a dark machine must not
+    // override someone who asked for light.
+    stubDom(true, 'light')
+    assert.equal(readTheme(), 'light')
+    stubDom(false, 'dark')
     assert.equal(readTheme(), 'dark')
   })
 
-  test('choosing system forgets the stored preference', () => {
-    // Otherwise "follow the system" would only last until the next reload,
-    // which is the one state where that is most obviously wrong.
-    const { store } = stubDom(false)
-    applyTheme('light')
-    applyTheme('system')
-    assert.equal(store.has('automa-flow-canvas:theme'), false)
-    assert.equal(readTheme(), 'system')
-  })
-
-  test('an unset or corrupt preference reads as system', () => {
-    const { store } = stubDom(false)
-    assert.equal(readTheme(), 'system')
-    store.set('automa-flow-canvas:theme', 'chartreuse')
-    assert.equal(readTheme(), 'system')
-  })
-})
-
-describe('cycling', () => {
-  test('light, dark, system, and back', () => {
-    const seen: Theme[] = []
-    let current: Theme = 'light'
-    for (let i = 0; i < 3; i++) {
-      seen.push(current)
-      current = nextTheme(current)
-    }
-    assert.deepEqual(seen, ['light', 'dark', 'system'])
-    assert.equal(current, 'light')
-  })
-
-  test('two presses from system land somewhere explicit', () => {
-    // System sits last on purpose: someone reaching for the button usually
-    // wants a specific theme, not a round trip back to where they started.
-    assert.equal(nextTheme(nextTheme('system')), 'dark')
-  })
-})
-
-describe('the label', () => {
-  test('names what the system currently is, not just that it is the system', () => {
+  test('the system decides only the very first visit', () => {
     stubDom(true)
-    assert.equal(themeLabel('system'), 'System (dark)')
+    assert.equal(readTheme(), 'dark')
     stubDom(false)
-    assert.equal(themeLabel('system'), 'System (light)')
+    assert.equal(readTheme(), 'light')
   })
 
-  test('an explicit choice says only itself', () => {
-    assert.equal(themeLabel('light'), 'Light')
-    assert.equal(themeLabel('dark'), 'Dark')
+  test('a corrupt stored value falls back to the system rather than to nothing', () => {
+    stubDom(true, 'chartreuse')
+    assert.equal(readTheme(), 'dark')
+  })
+})
+
+describe('the toggle', () => {
+  test('flips, and only flips', () => {
+    assert.equal(nextTheme('light'), 'dark')
+    assert.equal(nextTheme('dark'), 'light')
+    assert.equal(nextTheme(nextTheme('light')), 'light')
+  })
+
+  test('is labelled with what it will do, not what is on', () => {
+    // A control labelled with its own current state reads as a status and gets
+    // left alone.
+    assert.equal(themeLabel('light'), 'Switch to dark')
+    assert.equal(themeLabel('dark'), 'Switch to light')
+  })
+})
+
+describe('reading the system', () => {
+  test('reports what the machine says', () => {
+    stubDom(true)
+    assert.equal(systemTheme(), 'dark')
+    stubDom(false)
+    assert.equal(systemTheme(), 'light')
   })
 })

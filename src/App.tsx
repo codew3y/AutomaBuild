@@ -79,6 +79,11 @@ export interface FlowSummary {
   readonly endpointId: string | null
   readonly scheme: string | null
   readonly isDefault: boolean
+  readonly published: boolean
+  readonly publishedAt: string | null
+  readonly runCount: number
+  readonly lastRunAt: string | null
+  readonly lastRunStatus: string | null
 }
 
 export interface WebhookInfo {
@@ -87,6 +92,115 @@ export interface WebhookInfo {
   readonly scheme: string
   readonly signatureHeader: string
   readonly secretConfigured: boolean
+}
+
+/**
+ * The overview: every flow, and a way into one.
+ *
+ * The editor used to be the whole application, with a dropdown in its header
+ * for changing which flow it was editing. That made the flow list a detail of
+ * the editor rather than the thing you actually arrive at, and gave no way to
+ * be looking at nothing in particular — which is exactly where you are before
+ * you have decided what to work on.
+ *
+ * Each card says the two things that decide whether a flow needs attention:
+ * whether it has ever been published, and when it last ran.
+ */
+function Overview({
+  flows,
+  onOpen,
+  onCreate,
+  onArchive,
+  connected,
+  now,
+}: {
+  readonly flows: readonly FlowSummary[]
+  readonly onOpen: (flowId: string) => void
+  readonly onCreate: () => void
+  readonly onArchive: (flow: FlowSummary) => void
+  readonly connected: boolean
+  readonly now: number
+}) {
+  return (
+    <div className="overview">
+      <header className="overview-head">
+        <div>
+          <h1>Flows</h1>
+          <p className="muted">
+            {connected
+              ? `${flows.length} flow${flows.length === 1 ? '' : 's'} on this server`
+              : 'No server connected — start the AutomaBuild server to see your flows'}
+          </p>
+        </div>
+        <button className="publish" onClick={onCreate} disabled={!connected}>
+          New flow
+        </button>
+      </header>
+
+      {flows.length === 0 ? (
+        <p className="muted overview-empty">
+          {connected
+            ? 'Nothing here yet. Create a flow and it will get its own webhook address.'
+            : 'Nothing to show without a server.'}
+        </p>
+      ) : (
+        <ul className="flow-grid">
+          {flows.map((flow) => (
+            <li key={flow.flowId}>
+              {/* The card is the button. A card with a separate "open" control
+                  makes people hunt for the control, and the whole card is the
+                  target they were already aiming at. */}
+              <button className="flow-card" onClick={() => onOpen(flow.flowId)}>
+                <span className="flow-card-top">
+                  <span className="flow-card-name">{flow.name}</span>
+                  {flow.isDefault && <span className="tag">default</span>}
+                </span>
+
+                <span className="flow-card-meta muted">
+                  {flow.published ? (
+                    <span className="flow-live">● published</span>
+                  ) : (
+                    <span className="flow-draft">○ never published</span>
+                  )}
+                  {flow.scheme !== null && <span>· {flow.scheme}</span>}
+                </span>
+
+                <span className="flow-card-runs muted">
+                  {flow.runCount === 0
+                    ? 'no runs yet'
+                    : `${flow.runCount} run${flow.runCount === 1 ? '' : 's'}`}
+                  {flow.lastRunAt !== null && (
+                    <>
+                      {' · last '}
+                      <span className={`status-${flow.lastRunStatus ?? 'unknown'}`}>
+                        {flow.lastRunStatus}
+                      </span>
+                      {` ${relativeTime(flow.lastRunAt, now)}`}
+                    </>
+                  )}
+                </span>
+              </button>
+
+              {/* Outside the card, so clicking the card can never archive. */}
+              <button
+                className="flow-card-archive"
+                disabled={flow.isDefault}
+                title={
+                  flow.isDefault
+                    ? 'The default flow cannot be archived — the server recreates it on every start'
+                    : `Archive ${flow.name}`
+                }
+                aria-label={`Archive ${flow.name}`}
+                onClick={() => onArchive(flow)}
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
 }
 
 /**
@@ -473,15 +587,23 @@ function Editor() {
     apiFetch('api/flows')
       .then((response) => (response.ok ? response.json() : null))
       .then((data: FlowSummary[] | null) => {
-        if (!Array.isArray(data) || data.length === 0) return
+        if (!Array.isArray(data)) return
         setFlowList(data)
-        setFlowId((current) => {
-          if (select !== undefined) return select
-          // Keep the open flow across a refresh of the list; otherwise open the
-          // default, and fall back to the first if there is no default.
-          if (current !== null && data.some((flow) => flow.flowId === current)) return current
-          return (data.find((flow) => flow.isDefault) ?? data[0]!).flowId
-        })
+        setConnected(true)
+
+        // Nothing is opened automatically. The overview is where you arrive,
+        // and picking a flow to edit is a decision rather than a default —
+        // opening one on load meant there was no way to be looking at the list
+        // itself. `select` is for right after creating a flow, where finding
+        // the new one in the list would be a step nobody wants.
+        if (select !== undefined) setFlowId(select)
+        else {
+          // A flow that has gone (archived elsewhere, or by us) must not stay
+          // open with an id the server no longer serves.
+          setFlowId((current) =>
+            current !== null && data.some((flow) => flow.flowId === current) ? current : null,
+          )
+        }
       })
       .catch((error: unknown) => {
         if (error instanceof UnauthorizedError) setNeedsKey(true)
@@ -656,6 +778,66 @@ function Editor() {
     setPublishError(null)
     setPublishState('ready')
   }, [published])
+
+  /**
+   * Archive a flow.
+   *
+   * Lifted out of the toolbar so the overview can offer it too, and so both
+   * places ask the same question and clean up the same draft.
+   */
+  const archiveFlow = useCallback(
+    (flow: FlowSummary) => {
+      const ok = window.confirm(
+        [
+          `Archive "${flow.name}"?`,
+          '',
+          'Its webhook address stops accepting deliveries, and the flow ' +
+            'and its run history disappear from the editor.',
+          '',
+          'Nothing is deleted — the runs stay in the database — but ' +
+            'there is no way back to them from here.',
+        ].join(CONFIRM_NEWLINE),
+      )
+      if (!ok) return
+
+      apiFetch(`api/flows/${encodeURIComponent(flow.flowId)}`, { method: 'DELETE' })
+        .then(async (response) => {
+          const data = (await response.json()) as { error?: string }
+          if (!response.ok) throw new Error(data.error ?? 'could not archive the flow')
+          try {
+            // The flow is gone from the list; a draft left behind would come
+            // back if the id ever did.
+            localStorage.removeItem(draftKeyFor(flow.flowId))
+          } catch {
+            // Nothing to do; the draft simply outlives the flow.
+          }
+          setFlowId(null)
+          loadFlows()
+        })
+        .catch((error: unknown) => {
+          setPublishError(error instanceof Error ? error.message : String(error))
+        })
+    },
+    [loadFlows],
+  )
+
+  const createFlow = useCallback(() => {
+    const name = window.prompt('Name the new flow')
+    if (name === null || name.trim() === '') return
+    apiFetch('api/flows', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: name.trim() }),
+    })
+      .then(async (response) => {
+        const created = (await response.json()) as { flowId?: string; error?: string }
+        if (!response.ok) throw new Error(created.error ?? 'could not create the flow')
+        loadFlows(created.flowId)
+      })
+      .catch((error: unknown) => {
+        setPublishError(error instanceof Error ? error.message : String(error))
+      })
+  }, [loadFlows])
 
   const pickRun = useCallback(
     (id: string) => {
@@ -941,120 +1123,101 @@ function Editor() {
     [nodes, selectedNodeId],
   )
 
+  // No flow open means the overview, which is the application's front door.
+  // Rendered before the editor rather than inside it: the editor's whole
+  // structure — toolbar, canvas, panels — assumes a flow, and threading "there
+  // is no flow" through all of it would put a null check on every branch.
+  // Not `&& !viewing`: leaving a flow from History would otherwise fall through
+  // to an editor with no flow behind it.
+  if (flowId === null) {
+    return (
+      <div className="editor">
+        <header className="toolbar">
+          <strong className="brand">Automabuild</strong>
+          <div className="spacer" />
+          <button
+            className="theme-toggle"
+            onClick={() => setTheme((current) => nextTheme(current))}
+            aria-label={themeLabel(theme)}
+            title={themeLabel(theme)}
+          >
+            {themeGlyph(theme)}
+          </button>
+        </header>
+
+        {needsKey && (
+          <div className="restored needs-key" role="alert">
+            <span>
+              The server requires a key. Paste the value of <code>API_KEY</code>:
+            </span>
+            <input
+              type="password"
+              aria-label="API key"
+              placeholder="API key"
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter') return
+                const value = event.currentTarget.value.trim()
+                if (value === '') return
+                writeApiKey(value)
+                window.location.reload()
+              }}
+            />
+          </div>
+        )}
+
+        {publishError !== null && (
+          <div className="restored publish-error" role="alert">
+            <span>{publishError}</span>
+            <button className="dismiss" aria-label="Dismiss" onClick={() => setPublishError(null)}>
+              ✕
+            </button>
+          </div>
+        )}
+
+        <Overview
+          flows={flowList}
+          connected={connected}
+          now={renderedAt}
+          onOpen={(id) => setFlowId(id)}
+          onCreate={createFlow}
+          onArchive={archiveFlow}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="editor">
       <header className="toolbar">
         <strong className="brand">Automabuild</strong>
 
         {/*
-          Which flow is open. Only shown when a server is answering — without
-          one there is a single local draft and nothing to switch between, and
-          a picker with one permanent entry is furniture.
-        */}
-        {flowList.length > 0 && (
-          <select
-            className="flow-picker"
-            value={flowId ?? ''}
-            onChange={(event) => {
-              const chosen = event.target.value
-              if (chosen === '__new__') {
-                const name = window.prompt('Name the new flow')
-                if (name === null || name.trim() === '') return
-                apiFetch('api/flows', {
-                  method: 'POST',
-                  headers: { 'content-type': 'application/json' },
-                  body: JSON.stringify({ name: name.trim() }),
-                })
-                  .then(async (response) => {
-                    const created = (await response.json()) as { flowId?: string; error?: string }
-                    if (!response.ok) throw new Error(created.error ?? 'could not create the flow')
-                    // Open it immediately: creating a flow and then having to
-                    // find it in the list is a step nobody wants.
-                    loadFlows(created.flowId)
-                  })
-                  .catch((error: unknown) => {
-                    setPublishError(error instanceof Error ? error.message : String(error))
-                  })
-                return
-              }
-              editorStore.getState().select(null)
-              setSetupOpen(false)
-              setFlowId(chosen)
-            }}
-            title="Which flow you are editing"
-          >
-            {flowList.map((flow) => (
-              <option key={flow.flowId} value={flow.flowId}>
-                {flow.name}
-              </option>
-            ))}
-            <option value="__new__">+ New flow…</option>
-          </select>
-        )}
+          Out of the flow, back to the list.
 
-        {/*
-          Archiving is a separate button rather than another entry in the
-          picker. A destructive action hidden among a list of places to go is
-          one somebody eventually chooses by accident, and this one takes a
-          webhook address out of service.
+          A dropdown made the flow list a detail of the editor; an exit makes
+          the list the place you came from. It carries the flow's name because
+          "which flow am I in" is the question a canvas full of steps cannot
+          answer on its own.
         */}
-        {flowId !== null && (
-          <button
-            className="flow-archive"
-            // Shown disabled on the default rather than hidden. A control that
-            // vanishes leaves someone hunting for a button that is not there;
-            // one that is present and says why answers the question instead.
-            disabled={flowList.find((flow) => flow.flowId === flowId)?.isDefault ?? false}
-            title={
-              flowList.find((flow) => flow.flowId === flowId)?.isDefault === true
-                ? 'The default flow cannot be archived — the server recreates it on every start'
-                : 'Archive this flow'
-            }
-            aria-label="Archive this flow"
-            onClick={() => {
-              const current = flowList.find((flow) => flow.flowId === flowId)
-              if (current === undefined) return
-              // Says what actually happens. The rows are kept, but with the
-              // flow out of the list and its endpoint disabled there is no
-              // longer a way to reach them from here — and "past runs are
-              // kept" on its own would read as a promise that they stay
-              // visible.
-              const ok = window.confirm(
-                [
-                  `Archive "${current.name}"?`,
-                  '',
-                  'Its webhook address stops accepting deliveries, and the flow ' +
-                    'and its run history disappear from the editor.',
-                  '',
-                  'Nothing is deleted — the runs stay in the database — but ' +
-                    'there is no way back to them from here.',
-                ].join(CONFIRM_NEWLINE),
-              )
-              if (!ok) return
-
-              apiFetch(`api/flows/${encodeURIComponent(flowId)}`, { method: 'DELETE' })
-                .then(async (response) => {
-                  const data = (await response.json()) as { error?: string }
-                  if (!response.ok) throw new Error(data.error ?? 'could not archive the flow')
-                  // Drop this flow's draft too: the flow is gone from the list,
-                  // and leaving the draft behind would restore it if the id
-                  // ever came back.
-                  try {
-                    localStorage.removeItem(draftKeyFor(flowId))
-                  } catch {
-                    // Nothing to do; the draft simply outlives the flow.
-                  }
-                  setFlowId(null)
-                  loadFlows()
-                })
-                .catch((error: unknown) => {
-                  setPublishError(error instanceof Error ? error.message : String(error))
-                })
-            }}
-          >
-            ✕
-          </button>
-        )}
+        <button
+          className="exit-flow"
+          onClick={() => {
+            editorStore.getState().select(null)
+            // Back to Builder as well as back to the list: History is a mode
+            // of a flow, and arriving in it again on the next flow you open
+            // would be a state you never asked for.
+            editorStore.getState().setMode('edit')
+            setSetupOpen(false)
+            setFlowId(null)
+            loadFlows()
+          }}
+          title="Back to all flows"
+        >
+          <span aria-hidden="true">✕</span>
+          <span className="exit-flow-name">
+            {flowList.find((flow) => flow.flowId === flowId)?.name ?? 'Flow'}
+          </span>
+        </button>
 
         <div className="modes">
           <button

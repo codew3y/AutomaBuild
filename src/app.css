@@ -11,12 +11,10 @@
  * filled tiles rather than by borders — a border tints the outline of a shape,
  * a tile reads as an icon from across the room.
  *
- * Three theme states, not two. An explicit choice sets data-theme on the root;
- * leaving it to the system sets nothing, and only prefers-color-scheme
- * separates light from dark. So the light palette is defined on bare :root, the
- * media query is guarded so an explicit "light" beats a dark system, and the
- * [data-theme='dark'] block repeats the values so an explicit "dark" beats a
- * light system. Miss either guard and the toggle works one way only.
+ * Two theme states. The choice is always explicit and always stamped on the
+ * root, so there is no prefers-color-scheme block to guard against: light lives
+ * on bare :root as the default, and [data-theme='dark'] replaces it. The system
+ * is consulted once, in theme.ts, to pick the first-ever value.
  */
 
 :root {
@@ -64,47 +62,6 @@
   --shadow-lg: 0 8px 24px -4px rgb(16 24 40 / .12), 0 2px 6px -2px rgb(16 24 40 / .06);
 
   --dot: #d7dae0;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    color-scheme: dark;
-
-    /* Dark inverts the relationship: the canvas is the darkest thing and
-       panels lift *towards* the light, which is the only way a card reads as
-       being on top of something rather than cut out of it. */
-    --bg: #0c0e13;
-    --surface: #16191f;
-    --surface-2: #1b1f26;
-    --panel: #12151b;
-
-    --fg: #e7e9ee;
-    --muted: #939aa8;
-    --line: #262b34;
-    --line-strong: #333a45;
-
-    --accent: #8b8cf5;
-    --accent-soft: #1e1f3d;
-    --accent-contrast: #0c0e13;
-
-    --error: #f97066;
-    --error-soft: #2a1614;
-    --warn: #fdb022;
-    --warn-soft: #2a1f0e;
-    --ok: #47cd89;
-    --ok-soft: #0d2318;
-
-    --kind-trigger: #a78bfa;
-    --kind-http: #38bdf8;
-    --kind-transform: #fbbf24;
-    --kind-branch: #34d399;
-    --kind-email: #f472b6;
-
-    --shadow: 0 1px 2px rgb(0 0 0 / .4), 0 1px 3px rgb(0 0 0 / .3);
-    --shadow-lg: 0 12px 32px -6px rgb(0 0 0 / .55), 0 2px 8px -2px rgb(0 0 0 / .4);
-
-    --dot: #262b34;
-  }
 }
 
 :root[data-theme='dark'] {
@@ -1001,3 +958,109 @@ button.danger.inline { width: auto; margin-top: 0; }
 .react-flow__controls-button:hover { background: var(--surface-2); }
 .react-flow__controls-button svg { fill: var(--fg); }
 .react-flow__controls-button:disabled svg { fill: var(--muted); opacity: .5; }
+
+/* =========================================================== the overview */
+
+.overview {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.75rem 2rem 3rem;
+  background: var(--bg);
+}
+
+.overview-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  max-width: 68rem;
+  margin: 0 auto 1.5rem;
+}
+.overview-head > div { flex: 1; }
+.overview-head h1 { font-size: 1.35rem; font-weight: 650; letter-spacing: -.02em; margin: 0 0 .2rem; }
+.overview-head p { margin: 0; }
+
+.overview-empty { max-width: 68rem; margin: 0 auto; }
+
+/* A grid that reflows rather than a fixed column count: the useful number of
+   columns depends on the window, not on a number picked here. */
+.flow-grid {
+  list-style: none;
+  margin: 0 auto;
+  padding: 0;
+  max-width: 68rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: .75rem;
+}
+
+/* The archive sits over the card rather than inside it, so a click on the card
+   can never be a click on the archive. */
+.flow-grid li { position: relative; }
+
+.flow-card {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  width: 100%;
+  text-align: left;
+  padding: .85rem 2.5rem .85rem .9rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.flow-card:hover { border-color: var(--accent); box-shadow: var(--shadow-lg); background: var(--surface); }
+
+.flow-card-top { display: flex; align-items: baseline; gap: .4rem; }
+.flow-card-name {
+  font-size: .92rem;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.flow-card-meta,
+.flow-card-runs { display: flex; align-items: baseline; gap: .35rem; font-size: .74rem; }
+
+.flow-live { color: var(--ok); font-weight: 600; }
+.flow-draft { color: var(--muted); }
+
+.flow-card-archive {
+  position: absolute;
+  top: .6rem;
+  right: .6rem;
+  padding: .2rem .4rem;
+  font-size: .75rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.flow-card-archive:hover:not(:disabled) {
+  color: var(--error);
+  border-color: var(--error);
+  background: var(--error-soft);
+}
+
+/* -------------------------------------------------------------- exit flow */
+
+/* Reads as a breadcrumb rather than a button: it is where you came from, and a
+   heavier control here would compete with Publish. */
+.exit-flow {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+  max-width: 16rem;
+}
+.exit-flow:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--fg);
+}
+.exit-flow-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
