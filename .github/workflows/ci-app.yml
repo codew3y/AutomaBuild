@@ -65,12 +65,29 @@ jobs:
           docker compose logs mailpit --tail 20
           exit 1
 
+      # `pg_isready` is not enough here, and the failure it allows is rare
+      # enough to look like bad luck: `read ECONNRESET` from the migration, on
+      # a job that passed on the previous commit.
+      #
+      # The official Postgres image's entrypoint starts a *temporary* server to
+      # run initdb and any init scripts, then shuts it down and starts the real
+      # one. `pg_isready` answers yes against that temporary server, the loop
+      # exits, and the next step connects into the restart window.
+      #
+      # So: a real query rather than a readiness ping, and three consecutive
+      # successes a second apart, which no restart window survives.
       - name: wait for both databases
         run: |
+          streak=0
           for _ in $(seq 1 90); do
-            if docker compose exec -T runner-db pg_isready -U automa -d automa >/dev/null 2>&1                && docker compose exec -T gate-db pg_isready -U webhookgate -d webhookgate >/dev/null 2>&1; then
-              echo ready
-              exit 0
+            if docker compose exec -T runner-db psql -U automa -d automa -c 'select 1' >/dev/null 2>&1                && docker compose exec -T gate-db psql -U webhookgate -d webhookgate -c 'select 1' >/dev/null 2>&1; then
+              streak=$((streak + 1))
+              if [ "$streak" -ge 3 ]; then
+                echo ready
+                exit 0
+              fi
+            else
+              streak=0
             fi
             sleep 1
           done
