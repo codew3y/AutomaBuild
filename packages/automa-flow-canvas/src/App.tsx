@@ -125,10 +125,9 @@ function NewFlowDialog({
   onCreate,
 }: {
   readonly onClose: () => void
-  readonly onCreate: (name: string, scheme: string) => Promise<void>
+  readonly onCreate: (name: string) => Promise<void>
 }) {
   const [name, setName] = useState('')
-  const [scheme, setScheme] = useState('stripe')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -137,7 +136,7 @@ function NewFlowDialog({
     if (trimmed === '' || busy) return
     setBusy(true)
     setError(null)
-    onCreate(trimmed, scheme).catch((problem: unknown) => {
+    onCreate(trimmed).catch((problem: unknown) => {
       setError(problem instanceof Error ? problem.message : String(problem))
       setBusy(false)
     })
@@ -182,20 +181,22 @@ function NewFlowDialog({
             />
           </label>
 
-          <label className="field">
-            <span>webhook scheme</span>
-            <select value={scheme} onChange={(event) => setScheme(event.target.value)}>
-              <option value="stripe">Stripe</option>
-              <option value="github">GitHub</option>
-              <option value="slack">Slack</option>
-              <option value="standard">Standard Webhooks</option>
-            </select>
-          </label>
+          {/*
+            The signature scheme used to be asked here, and it should not have
+            been. Creating a flow is the moment someone knows least about it —
+            least of all which of four signing conventions the thing that has
+            not been connected yet will use. It made naming a flow wait behind
+            a cryptography question, and the honest hint underneath admitted
+            the failure mode was opaque.
+
+            The flow now takes the server's configured scheme, and the trigger
+            panel shows which one it got along with the header it expects. That
+            is where someone is already looking when they wire up a sender, and
+            it is the only point at which the answer is knowable.
+          */}
           <p className="muted endpoint-hint">
-            How deliveries to this flow will be signed. It has to match whoever
-            is sending — a GitHub webhook checked as a Stripe one fails every
-            time, and the failure reads as a bad secret rather than a wrong
-            scheme.
+            You&rsquo;ll get a webhook address for this flow straight away. Open
+            the trigger to see it, along with how deliveries to it are signed.
           </p>
 
           <p className="muted endpoint-hint">
@@ -976,11 +977,15 @@ function Editor() {
   )
 
   const createFlow = useCallback(
-    (name: string, scheme: string) =>
+    // No scheme. Omitting it lets the server apply the one it is configured
+    // with, which is also the one every existing endpoint already uses — so a
+    // flow made here can receive a delivery from the same sender as the last
+    // one without anybody choosing anything.
+    (name: string) =>
       apiFetch('api/flows', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name, scheme }),
+        body: JSON.stringify({ name }),
       }).then(async (response) => {
         const created = (await response.json()) as { flowId?: string; error?: string }
         if (!response.ok) throw new Error(created.error ?? 'could not create the flow')

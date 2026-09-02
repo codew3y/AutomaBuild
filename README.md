@@ -32,7 +32,7 @@ agree.
 | **A** | `automa-safe-fetch` — an SSRF-hardened HTTP client. Resolves, validates every address, and pins the connection to the one it checked. Zero dependencies. | [`packages/automa-safe-fetch`](packages/automa-safe-fetch) · [npm](https://www.npmjs.com/package/automa-safe-fetch) |
 | **B** | `automa-webhook-gate` — signature verification for Stripe, GitHub, Slack and Standard Webhooks, with a Postgres-backed replay store. | [`packages/automa-webhook-gate`](packages/automa-webhook-gate) |
 | **C** | `automa-durable-runner` — a durable execution engine. Leases, at-least-once delivery with idempotent effects, partitioned tables, a janitor, a DLQ. | [`packages/automa-durable-runner`](packages/automa-durable-runner) |
-| **D** | `automa-flow-canvas` — the React Flow editor: build a flow, map fields between steps, read the history of what ran. | [`packages/automa-flow-canvas`](packages/automa-flow-canvas) · [live](https://codew3y.github.io/automa-flow-canvas/) |
+| **D** | `automa-flow-canvas` — the React Flow editor: build a flow, map fields between steps, read the history of what ran. | [`packages/automa-flow-canvas`](packages/automa-flow-canvas) · [live](https://codew3y.github.io/AutomaBuild/) |
 
 Each package keeps its own README, tests and CI. They were four repositories
 until they were merged here with `git subtree`, so every component's history is
