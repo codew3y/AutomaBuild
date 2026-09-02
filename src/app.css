@@ -1073,3 +1073,115 @@ button.danger.inline { width: auto; margin-top: 0; }
   color: var(--fg);
 }
 .exit-flow-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --------------------------------------------------------- canvas helpers -- */
+
+/*
+  The ghost of the next step.
+
+  Positioned in flow coordinates through a viewport portal, so it pans and
+  zooms with the graph the way a real node would — a hint that stayed put
+  while the canvas moved would point at nothing.
+*/
+.append-hint {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  width: 200px;
+  min-height: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 12px;
+  box-sizing: border-box;
+  border: 1.5px dashed var(--line-strong);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  color: var(--muted);
+  text-align: center;
+  opacity: 0.65;
+  transition: opacity 120ms, border-color 120ms, background 120ms, transform 120ms;
+}
+
+.append-hint.over {
+  opacity: 1;
+  border-color: var(--accent);
+  border-style: solid;
+  background: var(--accent-soft);
+  color: var(--accent);
+  transform: scale(1.02);
+}
+
+.append-hint-plus { font-size: 18px; line-height: 1; }
+.append-hint-text { font-size: 11px; line-height: 1.3; }
+
+/* A dashed stub from the last step to the hint, so the two read as joined. */
+.append-hint::before {
+  content: '';
+  position: absolute;
+  right: 100%;
+  top: 50%;
+  width: 60px;
+  border-top: 1.5px dashed var(--line-strong);
+}
+
+/*
+  The controls that sit on an edge.
+
+  The wrapper must not take the pointer: it spans the label area, and anything
+  solid there would eat drags meant for the canvas underneath. Only the
+  scissors themselves are clickable, and only once the edge is hovered.
+*/
+.edge-tools {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  pointer-events: none;
+  font-size: 10px;
+}
+
+.edge-label {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.edge-cut {
+  pointer-events: all;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  /* Invisible until the edge is hovered, but never display:none — a hidden
+     button cannot be the thing the pointer is already over when it appears. */
+  opacity: 0;
+  transform: scale(0.8);
+  transition: opacity 100ms, transform 100ms, color 100ms, border-color 100ms;
+}
+
+.edge-tools.shown .edge-cut,
+.edge-cut:focus-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.edge-cut:hover {
+  color: var(--error);
+  border-color: var(--error);
+  background: var(--error-soft);
+}
+
+.edge-hit { pointer-events: stroke; cursor: pointer; }

@@ -22,6 +22,7 @@ import {
   Controls,
   ReactFlow,
   ReactFlowProvider,
+  ViewportPortal,
   type Connection,
   type Edge,
   type EdgeChange,
@@ -52,6 +53,7 @@ import {
   type Theme,
 } from './core/theme.ts'
 import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
+import { edgeTypes } from './components/CuttableEdge.tsx'
 import { EMPTY_FLOW, SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
 import './app.css'
 
@@ -92,6 +94,113 @@ export interface WebhookInfo {
   readonly scheme: string
   readonly signatureHeader: string
   readonly secretConfigured: boolean
+}
+
+/**
+ * Naming a new flow.
+ *
+ * A dialog rather than window.prompt. The prompt could not say what a flow
+ * gets when it is created — its own webhook address, in a scheme that has to
+ * match whoever will be sending to it — and offered no way to choose the
+ * scheme at all, so every flow was a Stripe one whether or not that was true.
+ */
+function NewFlowDialog({
+  onClose,
+  onCreate,
+}: {
+  readonly onClose: () => void
+  readonly onCreate: (name: string, scheme: string) => Promise<void>
+}) {
+  const [name, setName] = useState('')
+  const [scheme, setScheme] = useState('stripe')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = () => {
+    const trimmed = name.trim()
+    if (trimmed === '' || busy) return
+    setBusy(true)
+    setError(null)
+    onCreate(trimmed, scheme).catch((problem: unknown) => {
+      setError(problem instanceof Error ? problem.message : String(problem))
+      setBusy(false)
+    })
+  }
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="dialog" role="dialog" aria-modal="true" aria-label="New flow">
+        <header className="dialog-header">
+          <div>
+            <strong>New flow</strong>
+          </div>
+          <button className="dismiss" onClick={onClose} aria-label="Close" title="Close (Esc)">
+            ✕
+          </button>
+        </header>
+
+        <div className="dialog-body">
+          <label className="field">
+            <span>name</span>
+            <input
+              value={name}
+              autoFocus
+              placeholder="Order notifications"
+              onChange={(event) => setName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') submit()
+              }}
+            />
+          </label>
+
+          <label className="field">
+            <span>webhook scheme</span>
+            <select value={scheme} onChange={(event) => setScheme(event.target.value)}>
+              <option value="stripe">Stripe</option>
+              <option value="github">GitHub</option>
+              <option value="slack">Slack</option>
+              <option value="standard">Standard Webhooks</option>
+            </select>
+          </label>
+          <p className="muted endpoint-hint">
+            How deliveries to this flow will be signed. It has to match whoever
+            is sending — a GitHub webhook checked as a Stripe one fails every
+            time, and the failure reads as a bad secret rather than a wrong
+            scheme.
+          </p>
+
+          <p className="muted endpoint-hint">
+            The flow gets its own webhook address, using the server&rsquo;s{' '}
+            <code>WEBHOOK_SECRETS</code>. You can see the address on its trigger
+            once it is created.
+          </p>
+
+          {error !== null && <p className="endpoint-warn">{error}</p>}
+        </div>
+
+        <footer className="dialog-footer">
+          <div className="spacer" />
+          <button onClick={onClose}>Cancel</button>
+          <button className="publish" onClick={submit} disabled={name.trim() === '' || busy}>
+            {busy ? 'Creating…' : 'Create flow'}
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
 }
 
 /**
@@ -452,6 +561,10 @@ function Editor() {
    */
   const [flowList, setFlowList] = useState<readonly FlowSummary[]>([])
   const [flowId, setFlowId] = useState<string | null>(null)
+  const [newFlowOpen, setNewFlowOpen] = useState(false)
+
+  /** Whether a step is being dragged over the append hint. */
+  const [dropHint, setDropHint] = useState(false)
 
   // The autosave closure is built once and outlives every flow switch, so it
   // reads the current flow through a ref. Capturing flowId directly would have
@@ -821,23 +934,20 @@ function Editor() {
     [loadFlows],
   )
 
-  const createFlow = useCallback(() => {
-    const name = window.prompt('Name the new flow')
-    if (name === null || name.trim() === '') return
-    apiFetch('api/flows', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: name.trim() }),
-    })
-      .then(async (response) => {
+  const createFlow = useCallback(
+    (name: string, scheme: string) =>
+      apiFetch('api/flows', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name, scheme }),
+      }).then(async (response) => {
         const created = (await response.json()) as { flowId?: string; error?: string }
         if (!response.ok) throw new Error(created.error ?? 'could not create the flow')
+        setNewFlowOpen(false)
         loadFlows(created.flowId)
-      })
-      .catch((error: unknown) => {
-        setPublishError(error instanceof Error ? error.message : String(error))
-      })
-  }, [loadFlows])
+      }),
+    [loadFlows],
+  )
 
   const pickRun = useCallback(
     (id: string) => {
@@ -1007,6 +1117,7 @@ function Editor() {
         target: edge.target,
         ...(edge.sourceHandle === undefined ? {} : { sourceHandle: edge.sourceHandle }),
         ...(edge.targetHandle === undefined ? {} : { targetHandle: edge.targetHandle }),
+        type: 'cuttable',
         label: edge.sourceHandle,
         animated: viewing && taken,
         deletable: !viewing,
@@ -1085,6 +1196,23 @@ function Editor() {
     graphStore.endGesture()
   }, [])
 
+  /**
+   * The last step in the chain, and where a new one would go after it.
+   *
+   * "Last" is the node nothing leads away from. A branch has two, so there is
+   * no single place to offer — the drop hint is for the ordinary case of
+   * extending a straight chain, and a branch is not that.
+   */
+  const tail = useMemo(() => {
+    if (nodes.length === 0) return null
+    const hasOutgoing = new Set(edges.map((edge) => edge.source))
+    const ends = nodes.filter((node) => !hasOutgoing.has(node.id))
+    if (ends.length !== 1) return null
+    const node = ends[0]!
+    if (node.kind === 'branch') return null
+    return node
+  }, [nodes, edges])
+
   const addStep = useCallback((kind: string, position?: { x: number; y: number }) => {
     const id = `${kind}-${Math.random().toString(36).slice(2, 7)}`
     graphStore.getState().addNode({
@@ -1094,14 +1222,34 @@ function Editor() {
       data: { label: kind },
     })
     editorStore.getState().select(id)
+    return id
   }, [])
 
   // Dropping onto the canvas needs the pointer translated out of screen space
   // and into flow space, otherwise the node lands wherever the viewport
   // happens to be panned to rather than under the cursor.
+  /**
+   * Add a step and join it to the end of the chain.
+   *
+   * Dropping onto the hint means "carry on from here", so the connection is
+   * the point rather than a follow-up chore. Dropping anywhere else still
+   * leaves the step unconnected, because a step dropped in open space is
+   * usually one someone means to wire up themselves.
+   */
+  const appendStep = useCallback(
+    (kind: string) => {
+      if (tail === null) return
+      const id = addStep(kind, { x: tail.position.x + 260, y: tail.position.y })
+      graphStore.getState().connect({ source: tail.id, target: id })
+      graphStore.endGesture()
+    },
+    [tail, addStep],
+  )
+
   const onDrop = useCallback(
     (event: React.DragEvent) => {
       event.preventDefault()
+      setDropHint(false)
       if (viewing) return
       const kind = event.dataTransfer.getData('application/automabuild-step')
       // Anything else dragged in — a file, a text selection — is not ours.
@@ -1179,9 +1327,13 @@ function Editor() {
           connected={connected}
           now={renderedAt}
           onOpen={(id) => setFlowId(id)}
-          onCreate={createFlow}
+          onCreate={() => setNewFlowOpen(true)}
           onArchive={archiveFlow}
         />
+
+        {newFlowOpen && (
+          <NewFlowDialog onClose={() => setNewFlowOpen(false)} onCreate={createFlow} />
+        )}
       </div>
     )
   }
@@ -1448,6 +1600,7 @@ function Editor() {
           nodes={rfNodes}
           edges={rfEdges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
@@ -1467,7 +1620,47 @@ function Editor() {
           elementsSelectable
           fitView
         >
-          <Background gap={16} />
+          {/*
+          Where the next step would go.
+
+          A ghost of the card that would appear there, rather than a plus
+          button: it says what will happen and where, and dropping onto it
+          connects — which is the step everyone forgets after adding a node in
+          open space. Hidden while reading a run, and hidden for a branch,
+          which has two ends and therefore no single "next".
+        */}
+        {!viewing && tail !== null && (
+          <ViewportPortal>
+          <div
+            className={dropHint ? 'append-hint over' : 'append-hint'}
+            style={
+              {
+                '--x': `${tail.position.x + 260}px`,
+                '--y': `${tail.position.y}px`,
+              } as React.CSSProperties
+            }
+            onDragOver={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              setDropHint(true)
+            }}
+            onDragLeave={() => setDropHint(false)}
+            onDrop={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              setDropHint(false)
+              const kind = event.dataTransfer.getData('application/automabuild-step')
+              if (kind === '' || !STEP_KINDS.includes(kind as (typeof STEP_KINDS)[number])) return
+              appendStep(kind)
+            }}
+          >
+            <span className="append-hint-plus" aria-hidden="true">+</span>
+            <span className="append-hint-text">Drop here to continue the flow</span>
+          </div>
+          </ViewportPortal>
+        )}
+
+        <Background gap={16} />
           <Controls showInteractive={false} />
         </ReactFlow>
 
