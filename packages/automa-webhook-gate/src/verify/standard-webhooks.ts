@@ -6,6 +6,15 @@
  *   webhook-signature: v1,base64sig v1,anotherbase64sig
  *   signed payload:    `${id}.${timestamp}.${rawBody}`
  *
+ * The `svix-` names are accepted as aliases, and that is not a courtesy. Svix
+ * co-wrote this specification and delivers webhooks for a large number of
+ * services — Clerk and Resend among them — but sends `svix-id`,
+ * `svix-timestamp` and `svix-signature` rather than the spec's own names. The
+ * values are byte-identical and Svix's own libraries accept either set, so a
+ * verifier that reads only `webhook-*` rejects most of the traffic this scheme
+ * exists to accept, with `missing_signature` — a message that sends whoever
+ * reads it looking for a configuration mistake that is not there.
+ *
  * Three details that differ from the others and are easy to get wrong:
  *
  * **The signature list is space-delimited**, each entry `version,signature`.
@@ -76,22 +85,35 @@ export function parseSignatureHeader(value: string): ParsedSignatures {
   return { v1, skippedVersions: [...skipped] }
 }
 
+/**
+ * Read a Standard Webhooks header under either of its two names.
+ *
+ * The spec's name is tried first, so a sender using it is never affected by
+ * the alias. Only when it is absent is the `svix-` form consulted.
+ */
+function standardHeader(
+  headers: VerifyInput['headers'],
+  name: 'id' | 'timestamp' | 'signature',
+): string | undefined {
+  return header(headers, `webhook-${name}`) ?? header(headers, `svix-${name}`)
+}
+
 export function verifyStandardWebhooks(input: VerifyInput): VerificationResult {
   const failed = preflight(input)
   if (failed !== null) return failed
 
-  const id = header(input.headers, 'webhook-id')
+  const id = standardHeader(input.headers, 'id')
   if (id === undefined || id.length === 0) {
     return { ok: false, reason: 'malformed_signature', detail: 'webhook-id is required' }
   }
 
-  const rawTimestamp = header(input.headers, 'webhook-timestamp')
+  const rawTimestamp = standardHeader(input.headers, 'timestamp')
   if (rawTimestamp === undefined) return { ok: false, reason: 'missing_timestamp' }
   if (!/^[0-9]+$/.test(rawTimestamp)) {
     return { ok: false, reason: 'malformed_timestamp', detail: rawTimestamp.slice(0, 32) }
   }
 
-  const presented = header(input.headers, 'webhook-signature')
+  const presented = standardHeader(input.headers, 'signature')
   if (presented === undefined) return { ok: false, reason: 'missing_signature' }
 
   const parsed = parseSignatureHeader(presented)

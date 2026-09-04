@@ -292,6 +292,41 @@ describe('Standard Webhooks', () => {
     assert.equal(result.dedupKey, ID, 'the message id is a better key than the signature')
   })
 
+  it('accepts the svix- header names, which most real senders use', () => {
+    // Svix co-wrote this specification and delivers webhooks for a great many
+    // services — Clerk and Resend among them — but sends its own header names.
+    // The values are byte-identical, and Svix's own libraries accept either
+    // set, so reading only webhook-* rejects most of the traffic this scheme
+    // exists to accept.
+    const result = verify({
+      'svix-id': ID,
+      'svix-timestamp': String(TS),
+      'svix-signature': sign(),
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.dedupKey, ID)
+  })
+
+  it('prefers the spec name when a sender supplies both', () => {
+    // Not a contrived case: a proxy that normalises headers can add one while
+    // passing the other through. The spec's own name wins, so the alias can
+    // never change the meaning of a request that was already valid.
+    const result = verify({
+      ...headers(),
+      'svix-id': 'msg_from_the_alias',
+      'svix-timestamp': String(TS),
+      'svix-signature': sign('msg_from_the_alias'),
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.dedupKey, ID, 'the webhook-* headers should have been used')
+  })
+
+  it('still reports a missing signature when neither name is present', () => {
+    const result = verify({ 'webhook-id': ID, 'webhook-timestamp': String(TS) })
+    assert.equal(result.ok, false)
+    assert.equal(result.ok === false && result.reason, 'missing_signature')
+  })
+
   it('decodes a whsec_ secret to bytes rather than hashing the text', () => {
     // Hashing the printable secret produces a stable, plausible, wrong
     // signature — and fails identically to a wrong secret, which is why this
