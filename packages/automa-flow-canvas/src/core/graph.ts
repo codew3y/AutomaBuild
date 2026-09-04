@@ -196,6 +196,44 @@ export function orphans(graph: FlowGraph, entryId?: string): FlowNode[] {
   return graph.nodes.filter((node) => !reachable.has(node.id))
 }
 
+/**
+ * The end of the chain that starts at the entry point.
+ *
+ * "Where would the next step go?" — and the answer has to survive a graph that
+ * is mid-construction, because that is the only time anyone asks.
+ *
+ * Defining it as "the node with no outgoing edge" looked equivalent and was
+ * not: a step dropped in open space also has no outgoing edge, so one loose
+ * node made the answer ambiguous and the editor stopped offering anywhere to
+ * drop — permanently, until the orphan was wired up or deleted. Walking
+ * forward from the entry ignores orphans entirely, which is the right
+ * treatment: they are not on the chain.
+ *
+ * Null when there is no single answer — no entry point at all, or a branch,
+ * which has two ends and therefore no one place a next step belongs.
+ */
+export function chainTail(graph: FlowGraph): FlowNode | null {
+  const entry = entryPoint(graph)
+  if (entry === null) return null
+
+  const next = outgoing(graph)
+  const byId = new Map(graph.nodes.map((node) => [node.id, node]))
+
+  let current = entry
+  // Bounded by the node count: a cycle would otherwise walk forever, and a
+  // cycle is a thing `validate` reports rather than something to crash on.
+  for (let step = 0; step <= graph.nodes.length; step += 1) {
+    const targets = next.get(current.id) ?? []
+    if (targets.length === 0) return current
+    if (targets.length > 1) return null
+
+    const only = byId.get(targets[0]!)
+    if (only === undefined) return null
+    current = only
+  }
+  return null
+}
+
 /** Edges referring to a node that is not in the graph. */
 export function danglingEdges(graph: FlowGraph): FlowEdge[] {
   const known = new Set(graph.nodes.map((node) => node.id))

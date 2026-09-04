@@ -14,9 +14,13 @@
  * string, so there is nothing to escape and no way to get it wrong.
  *
  * **The API key ended up in the database.** The HTTP step's `auth` field is
- * part of the flow, and the flow is a published row in Postgres. This takes a
- * secret *reference* — `env:GROQ_API_KEY` — the same shape endpoint secrets
- * already use, so the flow records where the key lives rather than what it is.
+ * part of the flow, and the flow is a published row in Postgres. This does not
+ * ask for a key at all: it reads the provider's conventional environment
+ * variable — `GROQ_API_KEY` for groq, and so on — so a key already in the
+ * server's environment needs nothing configured here. The field exists for the
+ * cases that need it and takes a secret *reference*, the same shape endpoint
+ * secrets already use, so even then the flow records where the key lives
+ * rather than what it is.
  *
  * **The answer was buried.** `steps.x.output.body.choices[0].message.content`
  * is the path through OpenAI's response envelope, and every consumer had to
@@ -50,6 +54,28 @@ export const PROVIDERS: Record<string, string> = {
   // Google's OpenAI-compatible surface, rather than its own generateContent
   // shape — same protocol as the rest, so no special case here.
   gemini: 'https://generativelanguage.googleapis.com/v1beta/openai',
+}
+
+/**
+ * Where each provider's key is read from when the step does not say.
+ *
+ * Asking for the key at all was a mistake: the server already has it in its
+ * environment, and every provider has one obvious name for it. Typing
+ * `env:GROQ_API_KEY` into a form to tell the server about a variable the
+ * server set is work that produces nothing.
+ *
+ * These are the conventional names — the ones each provider's own quickstart
+ * uses — so a key put in `.env` under the name the docs gave it is found with
+ * no configuration. The field remains for the cases that need it: two keys for
+ * one provider, or a name chosen before this existed.
+ */
+export const DEFAULT_KEY_ENV: Record<string, string> = {
+  groq: 'GROQ_API_KEY',
+  openai: 'OPENAI_API_KEY',
+  openrouter: 'OPENROUTER_API_KEY',
+  together: 'TOGETHER_API_KEY',
+  cerebras: 'CEREBRAS_API_KEY',
+  gemini: 'GEMINI_API_KEY',
 }
 
 export interface AiStepConfig {
@@ -124,15 +150,14 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
       throw new StepFailure('the AI step has no model', { deterministicallyBroken: true })
     }
 
-    // A reference, not a key. `env:GROQ_API_KEY` is resolved here, at run
-    // time, so the flow row never holds the credential.
-    const keyRef = (config.apiKey ?? '').trim()
-    if (keyRef === '') {
-      throw new StepFailure(
-        'the AI step has no apiKey; set it to a reference such as env:GROQ_API_KEY',
-        { deterministicallyBroken: true },
-      )
-    }
+    // A reference, not a key, and usually not stated at all: the provider's
+    // conventional variable name is the default, so a key in the server's
+    // environment is found with nothing configured here.
+    const provider = (config.provider ?? 'groq').trim().toLowerCase()
+    const keyRef =
+      (config.apiKey ?? '').trim() !== ''
+        ? config.apiKey!.trim()
+        : `env:${DEFAULT_KEY_ENV[provider] ?? 'GROQ_API_KEY'}`
 
     let apiKey: string
     try {
@@ -140,10 +165,14 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
     } catch (error) {
       // Deterministic: an unset variable will be unset on every retry, and the
       // message names which one rather than leaving a 401 to be interpreted.
+      const asked =
+        (config.apiKey ?? '').trim() === ''
+          ? `no api key was set on the step, so ${keyRef} was tried`
+          : `the step's api key is ${keyRef}`
       throw new StepFailure(
         error instanceof SecretResolutionError
-          ? `the AI step's apiKey could not be resolved: ${error.message}`
-          : `the AI step's apiKey is not a usable reference: ${String(error)}`,
+          ? `the AI step could not resolve its api key — ${asked}: ${error.message}`
+          : `the AI step's api key is not a usable reference — ${asked}: ${String(error)}`,
         { deterministicallyBroken: true },
       )
     }

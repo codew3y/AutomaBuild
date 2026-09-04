@@ -40,6 +40,7 @@ import { createEditorStore } from './store/editor-store.ts'
 import {
   ancestors,
   canConnect,
+  chainTail,
   type FlowEdge,
   type FlowGraph,
   type FlowNode,
@@ -1392,19 +1393,14 @@ function Editor() {
   /**
    * The last step in the chain, and where a new one would go after it.
    *
-   * "Last" is the node nothing leads away from. A branch has two, so there is
-   * no single place to offer — the drop hint is for the ordinary case of
-   * extending a straight chain, and a branch is not that.
+   * Walked forward from the entry point rather than found by looking for a
+   * node with no outgoing edge. Those are not the same thing, and the
+   * difference was a real bug: a step dropped in open space also has no
+   * outgoing edge, so one loose node made the answer ambiguous and the hint
+   * vanished — for good, until the orphan was connected or deleted. See
+   * `chainTail`.
    */
-  const tail = useMemo(() => {
-    if (nodes.length === 0) return null
-    const hasOutgoing = new Set(edges.map((edge) => edge.source))
-    const ends = nodes.filter((node) => !hasOutgoing.has(node.id))
-    if (ends.length !== 1) return null
-    const node = ends[0]!
-    if (node.kind === 'branch') return null
-    return node
-  }, [nodes, edges])
+  const tail = useMemo(() => chainTail({ nodes, edges }), [nodes, edges])
 
   /**
    * The tail card's rendered size.

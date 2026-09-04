@@ -55,6 +55,26 @@ describe('the request it builds', () => {
     assert.equal(sent.messages[0]!.content, nasty, 'the prompt survives verbatim')
   })
 
+  it('finds the key without being told, from the provider’s usual variable', async () => {
+    // The step should not have to be told about a variable the server set.
+    // Asking for it was work that produced nothing.
+    const { calls, safeFetch } = recorder()
+    await aiHandler({ safeFetch, env: { GROQ_API_KEY: 'gsk_from_env' } })(
+      context({ prompt: 'p', model: 'm' }),
+    )
+    const headers = calls[0]!.init['headers'] as Record<string, string>
+    assert.equal(headers['authorization'], 'Bearer gsk_from_env')
+  })
+
+  it('uses the right variable for the chosen provider', async () => {
+    const { calls, safeFetch } = recorder()
+    await aiHandler({ safeFetch, env: { OPENAI_API_KEY: 'sk_openai' } })(
+      context({ prompt: 'p', model: 'm', provider: 'openai' }),
+    )
+    const headers = calls[0]!.init['headers'] as Record<string, string>
+    assert.equal(headers['authorization'], 'Bearer sk_openai')
+  })
+
   it('sends the key from the reference, and not the reference', async () => {
     const { calls, safeFetch } = recorder()
     await aiHandler({ safeFetch, env: { GROQ_API_KEY: 'gsk_secret' } })(
@@ -107,10 +127,9 @@ describe('the request it builds', () => {
 describe('what it refuses, once, rather than retrying', () => {
   const handler = () => aiHandler({ safeFetch: recorder().safeFetch, env: { KEY: 'k' } })
 
-  it('needs a prompt, a model and a key', async () => {
+  it('needs a prompt and a model', async () => {
     await assert.rejects(() => handler()(context({ model: 'm', apiKey: 'env:KEY' })), /no prompt/)
     await assert.rejects(() => handler()(context({ prompt: 'p', apiKey: 'env:KEY' })), /no model/)
-    await assert.rejects(() => handler()(context({ prompt: 'p', model: 'm' })), /no apiKey/)
   })
 
   it('names the variable when the key reference cannot be resolved', async () => {
@@ -121,6 +140,18 @@ describe('what it refuses, once, rather than retrying', () => {
           context({ prompt: 'p', model: 'm', apiKey: 'env:MISSING_KEY' }),
         ),
       /MISSING_KEY/,
+    )
+  })
+
+  it('says which variable it looked for when the step named none', async () => {
+    // The failure has to be legible when the step is silent about the key —
+    // otherwise "could not resolve its api key" names nothing to go and fix.
+    await assert.rejects(
+      () =>
+        aiHandler({ safeFetch: recorder().safeFetch, env: {} })(
+          context({ prompt: 'p', model: 'm' }),
+        ),
+      /no api key was set on the step, so env:GROQ_API_KEY was tried/,
     )
   })
 

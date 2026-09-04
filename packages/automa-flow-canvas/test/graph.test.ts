@@ -12,6 +12,7 @@ import {
   ancestors,
   assertParentsFirst,
   canConnect,
+  chainTail,
   danglingEdges,
   descendants,
   orphans,
@@ -325,5 +326,59 @@ describe('validation', () => {
     assert.deepEqual(referencedSteps('{{ steps.one.x }} and {{steps.two.y}}'), ['one', 'two'])
     assert.deepEqual(referencedSteps('no references here'), [])
     assert.deepEqual(referencedSteps(42), [])
+  })
+})
+
+describe('where the next step would go', () => {
+  it('walks to the end of the chain', () => {
+    const graph = {
+      nodes: [node('t', 'trigger'), node('a'), node('b')],
+      edges: [edge('t', 'a'), edge('a', 'b')],
+    }
+    assert.equal(chainTail(graph)?.id, 'b')
+  })
+
+  it('is the trigger itself on a flow with nothing after it', () => {
+    assert.equal(chainTail({ nodes: [node('t', 'trigger')], edges: [] })?.id, 't')
+  })
+
+  it('ignores a step dropped in open space', () => {
+    // The bug this function exists for. An orphan also has no outgoing edge,
+    // so defining the tail that way made one loose node ambiguous — and the
+    // editor stopped offering anywhere to drop, permanently, until the orphan
+    // was wired up or deleted.
+    const graph = {
+      nodes: [node('t', 'trigger'), node('a'), node('loose')],
+      edges: [edge('t', 'a')],
+    }
+    assert.equal(chainTail(graph)?.id, 'a', 'the orphan is not on the chain')
+  })
+
+  it('ignores several orphans, and one orphan on a bare trigger', () => {
+    assert.equal(
+      chainTail({ nodes: [node('t', 'trigger'), node('x'), node('y')], edges: [] })?.id,
+      't',
+    )
+  })
+
+  it('has no answer at a branch, which has two ends', () => {
+    const graph = {
+      nodes: [node('t', 'trigger'), node('b', 'branch'), node('yes'), node('no')],
+      edges: [edge('t', 'b'), edge('b', 'yes', 'yes'), edge('b', 'no', 'no')],
+    }
+    assert.equal(chainTail(graph), null)
+  })
+
+  it('has no answer for an empty graph', () => {
+    assert.equal(chainTail({ nodes: [], edges: [] }), null)
+  })
+
+  it('does not walk forever on a cycle', () => {
+    // validate() reports a cycle; this must not hang before it gets the chance.
+    const graph = {
+      nodes: [node('a'), node('b')],
+      edges: [edge('a', 'b'), edge('b', 'a')],
+    }
+    assert.equal(chainTail(graph), null)
   })
 })

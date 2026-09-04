@@ -136,8 +136,10 @@ export const SCHEMAS: Record<string, StepSchema> = {
   ai: {
     // `prompt` first: it is the field this step is about, and the only one
     // most flows change after the first time.
-    fields: ['prompt', 'model', 'provider', 'apiKey', 'system', 'maxTokens', 'temperature'],
-    required: ['prompt', 'model', 'apiKey'],
+    // `apiKey` is last and optional: the server reads the provider's usual
+    // variable, so the common case is to leave it alone.
+    fields: ['prompt', 'model', 'provider', 'system', 'maxTokens', 'temperature', 'apiKey'],
+    required: ['prompt', 'model'],
     label: 'Ask an AI',
     multiline: ['prompt', 'system'],
     choices: {
@@ -147,7 +149,7 @@ export const SCHEMAS: Record<string, StepSchema> = {
     placeholders: {
       prompt: 'Summarise this in one sentence: {{ trigger.body.message }}',
       model: 'llama-3.1-8b-instant',
-      apiKey: 'env:GROQ_API_KEY',
+      apiKey: 'usually leave empty',
       system: 'You are terse. Answer in one sentence.',
     },
     hints: {
@@ -157,8 +159,10 @@ export const SCHEMAS: Record<string, StepSchema> = {
       model: 'Whatever the provider calls it. groq: llama-3.1-8b-instant is free and fast.',
       provider: 'Defaults to groq. All of these speak the same protocol.',
       apiKey:
-        'A reference, not the key: env:GROQ_API_KEY reads it from the server ' +
-        'environment, so the published flow never holds your credential.',
+        'Optional. The server reads the provider’s usual variable on its own — ' +
+        'GROQ_API_KEY for groq, OPENAI_API_KEY for openai, and so on. Set this ' +
+        'only to point at a different one, as env:MY_OTHER_KEY. Never the key ' +
+        'itself: it would be saved into the published flow.',
       system: 'Optional. Standing instructions, applied before the prompt.',
       maxTokens: 'Optional. Caps the length of the reply.',
       temperature: 'Optional. 0 is repeatable, 1 is loose. Leave empty for the model default.',
