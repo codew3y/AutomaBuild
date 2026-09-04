@@ -29,6 +29,22 @@ import type { RunRecord } from './core/run.ts'
  *
  * `write` has no n8n equivalent; the name is Zapier's template category.
  */
+/**
+ * The providers a credential can be saved for.
+ *
+ * The same list the AI step's `provider` menu offers, named once: a
+ * credential saved for a provider the step cannot select would never be
+ * offered to anything.
+ */
+export const AI_PROVIDERS = [
+  'groq',
+  'openai',
+  'openrouter',
+  'together',
+  'cerebras',
+  'gemini',
+] as const
+
 export const AI_TASK_LABELS: Record<string, string> = {
   summarize: 'Summarization',
   classify: 'Text Classifier',
@@ -86,6 +102,15 @@ export interface StepSchema {
    * list of categories because someone looked at Summarization for a
    * moment, and a task ignores the fields it does not read anyway.
    */
+  /**
+   * Fields whose options come from the server rather than the schema.
+   *
+   * A credential list is not something a schema can hold: it is per
+   * tenant, it changes without a deploy, and the value stored in the flow
+   * is an id while the thing a person recognises is a name. The schema
+   * names the source; the editor fetches it and does the matching.
+   */
+  readonly optionsFrom?: Readonly<Record<string, 'credentials'>>
   readonly showWhen?: Readonly<
     Record<string, { readonly field: string; readonly is: readonly string[] }>
   >
@@ -225,6 +250,7 @@ export const SCHEMAS: Record<string, StepSchema> = {
       'provider',
       'maxTokens',
       'temperature',
+      'credential',
       'apiKey',
     ],
     required: ['prompt', 'model'],
@@ -235,8 +261,9 @@ export const SCHEMAS: Record<string, StepSchema> = {
       task: ['summarize', 'classify', 'extract', 'write', 'custom'],
       allowMultiple: ['single', 'multiple'],
       noMatch: ['other', 'fail'],
-      provider: ['groq', 'openai', 'openrouter', 'together', 'cerebras', 'gemini'],
+      provider: AI_PROVIDERS,
     },
+    optionsFrom: { credential: 'credentials' },
     choiceLabels: {
       task: AI_TASK_LABELS,
       allowMultiple: { single: 'one category', multiple: 'any that apply' },
@@ -252,7 +279,8 @@ export const SCHEMAS: Record<string, StepSchema> = {
       outputFields: 'output fields',
       allowMultiple: 'how many categories',
       noMatch: 'when nothing matches',
-      apiKey: 'api key',
+      credential: 'credential',
+      apiKey: 'api key (advanced)',
       maxTokens: 'max tokens',
     },
     placeholders: {
@@ -297,6 +325,10 @@ export const SCHEMAS: Record<string, StepSchema> = {
       system: 'Optional. Overrides the task’s own instruction when you write one.',
       model: 'Whatever the provider calls it. groq: llama-3.1-8b-instant is free and fast.',
       provider: 'Defaults to groq. All of these speak the same protocol.',
+      credential:
+        'A key you saved once, under Credentials on the flow list. Only the ones for ' +
+        'this provider are offered. Leave it empty and the server uses the provider ' +
+        'variable in its own environment instead.',
       apiKey:
         'Optional. The server reads the provider’s usual variable on its own — ' +
         'GROQ_API_KEY for groq, OPENAI_API_KEY for openai, and so on. Set this ' +

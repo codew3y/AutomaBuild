@@ -63,6 +63,7 @@ import {
 import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
 import { edgeTypes } from './components/CuttableEdge.tsx'
 import {
+  AI_PROVIDERS,
   AI_TASK_LABELS,
   EMPTY_FLOW,
   SAMPLE_FLOW,
@@ -130,6 +131,21 @@ export interface FlowSummary {
   readonly runCount: number
   readonly lastRunAt: string | null
   readonly lastRunStatus: string | null
+}
+
+/**
+ * A saved API key, as the editor is allowed to see it.
+ *
+ * There is no `secret` here and there is no endpoint that would provide one.
+ * The editor's whole job is to let someone pick which key a step uses, and a
+ * name is enough for that.
+ */
+export interface CredentialSummary {
+  readonly credentialId: string
+  readonly name: string
+  readonly provider: string
+  readonly createdAt: string
+  readonly lastUsedAt: string | null
 }
 
 export interface WebhookInfo {
@@ -260,10 +276,185 @@ function NewFlowDialog({
  * Each card says the two things that decide whether a flow needs attention:
  * whether it has ever been published, and when it last ran.
  */
+/**
+ * Credentials: the keys a tenant saves once and every flow can use.
+ *
+ * n8n's Credentials section, in one dialog. Reachable from the flow list
+ * rather than from inside a step, because a key belongs to the account and not
+ * to the flow that happens to need it first — and because the same key is
+ * meant to be picked by several flows, which is the entire point.
+ *
+ * A saved key is never shown again. Not a limitation to work around: the
+ * server has no route that returns one, so there is nothing to display even if
+ * this wanted to.
+ */
+function CredentialsDialog({
+  credentials,
+  providers,
+  onClose,
+  onCreate,
+  onDelete,
+  unavailable,
+}: {
+  readonly credentials: readonly CredentialSummary[]
+  readonly providers: readonly string[]
+  readonly onClose: () => void
+  readonly onCreate: (input: { name: string; provider: string; secret: string }) => Promise<void>
+  readonly onDelete: (credential: CredentialSummary) => void
+  /** Set when the server has no ENCRYPTION_KEY, so nothing can be stored. */
+  readonly unavailable: boolean
+}) {
+  const [name, setName] = useState('')
+  const [provider, setProvider] = useState(providers[0] ?? 'groq')
+  const [secret, setSecret] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const submit = () => {
+    if (busy || name.trim() === '' || secret.trim() === '') return
+    setBusy(true)
+    setError(null)
+    onCreate({ name: name.trim(), provider, secret })
+      .then(() => {
+        // Cleared on success only. A rejected key should still be in the field
+        // to correct rather than typed again from the beginning.
+        setName('')
+        setSecret('')
+      })
+      .catch((problem: unknown) => setError(problem instanceof Error ? problem.message : String(problem)))
+      .finally(() => setBusy(false))
+  }
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div className="dialog dialog-wide" role="dialog" aria-modal="true" aria-label="Credentials">
+        <header className="dialog-header">
+          <div>
+            <strong>Credentials</strong>
+            <span className="muted"> · saved once, used by every flow</span>
+          </div>
+          <button className="dismiss" onClick={onClose} aria-label="Close" title="Close (Esc)">
+            ✕
+          </button>
+        </header>
+
+        <div className="dialog-body">
+          {unavailable ? (
+            <p className="muted">
+              This server cannot store credentials: <code>ENCRYPTION_KEY</code> is not set. A key
+              is required because a saved credential is encrypted before it reaches the database —
+              without one there is nothing to encrypt it with, and storing it in the clear is not
+              an option this offers.
+            </p>
+          ) : (
+            <>
+              {credentials.length === 0 ? (
+                <p className="muted">
+                  Nothing saved yet. Add a key here and any AI step can pick it, instead of the
+                  key living in the flow.
+                </p>
+              ) : (
+                <ul className="cred-list">
+                  {credentials.map((credential) => (
+                    <li key={credential.credentialId}>
+                      <span className="cred-name">{credential.name}</span>
+                      <span className="tag">{credential.provider}</span>
+                      <span className="muted cred-used">
+                        {credential.lastUsedAt === null
+                          ? 'never used'
+                          : `last used ${credential.lastUsedAt.slice(0, 10)}`}
+                      </span>
+                      <button
+                        className="cred-remove"
+                        onClick={() => onDelete(credential)}
+                        aria-label={`Delete ${credential.name}`}
+                        title={`Delete ${credential.name}`}
+                      >
+                        ✕
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div className="cred-add">
+                <label className="field">
+                  <span>name</span>
+                  <input
+                    value={name}
+                    autoFocus
+                    placeholder="my groq key"
+                    onChange={(event) => setName(event.target.value)}
+                  />
+                </label>
+
+                <label className="field">
+                  <span>provider</span>
+                  <select value={provider} onChange={(event) => setProvider(event.target.value)}>
+                    {providers.map((option) => (
+                      <option key={option} value={option}>
+                        {option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="field">
+                  <span>key</span>
+                  {/* type=password so it is not left on screen or in a screenshot.
+                      It is sent once and never returned. */}
+                  <input
+                    type="password"
+                    value={secret}
+                    placeholder="gsk_…"
+                    onChange={(event) => setSecret(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') submit()
+                    }}
+                  />
+                </label>
+
+                <p className="muted endpoint-hint">
+                  Stored encrypted, and never shown again — there is no route that returns a saved
+                  key. To replace one, delete it and add it back.
+                </p>
+
+                {error !== null && <p className="publish-error">{error}</p>}
+
+                <button
+                  className="publish"
+                  onClick={submit}
+                  disabled={busy || name.trim() === '' || secret.trim() === ''}
+                >
+                  {busy ? 'Saving…' : 'Save credential'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function Overview({
   flows,
   onOpen,
   onCreate,
+  onCredentials,
   onArchive,
   connected,
   now,
@@ -271,6 +462,7 @@ function Overview({
   readonly flows: readonly FlowSummary[]
   readonly onOpen: (flowId: string) => void
   readonly onCreate: () => void
+  readonly onCredentials: () => void
   readonly onArchive: (flow: FlowSummary) => void
   readonly connected: boolean
   readonly now: number
@@ -286,9 +478,16 @@ function Overview({
               : 'No server connected — start the AutomaBuild server to see your flows'}
           </p>
         </div>
-        <button className="publish" onClick={onCreate} disabled={!connected}>
-          New flow
-        </button>
+        <div className="overview-actions">
+          {/* Credentials belong to the account rather than to a flow, so they
+              are reached from the list rather than from inside a step. */}
+          <button onClick={onCredentials} disabled={!connected}>
+            Credentials
+          </button>
+          <button className="publish" onClick={onCreate} disabled={!connected}>
+            New flow
+          </button>
+        </div>
       </header>
 
       {flows.length === 0 ? (
@@ -668,6 +867,11 @@ function Editor() {
 
   /** Whether a step is being dragged over the append hint. */
   const [dropHint, setDropHint] = useState(false)
+
+  const [credentials, setCredentials] = useState<readonly CredentialSummary[]>([])
+  const [credentialsOpen, setCredentialsOpen] = useState(false)
+  /** True when the server has no ENCRYPTION_KEY, so it cannot store any. */
+  const [credentialsUnavailable, setCredentialsUnavailable] = useState(false)
 
   /**
    * Which connections are selected.
@@ -1082,6 +1286,72 @@ function Editor() {
         })
     },
     [loadFlows],
+  )
+
+  /*
+    The tenant's saved keys.
+
+    Loaded once rather than per step, because every AI step offers the same
+    list and refetching per dialog would make opening one a network round
+    trip. A 501 means the server has no encryption key — not an error to
+    report, but a fact the dialog explains.
+  */
+  const loadCredentials = useCallback(() => {
+    apiFetch('api/credentials')
+      .then(async (response) => {
+        if (response.status === 501) {
+          setCredentialsUnavailable(true)
+          setCredentials([])
+          return
+        }
+        if (!response.ok) return
+        setCredentialsUnavailable(false)
+        setCredentials((await response.json()) as CredentialSummary[])
+      })
+      .catch(() => {
+        // No server, or not authorised. Both are already reported elsewhere.
+      })
+  }, [])
+
+  useEffect(() => {
+    loadCredentials()
+  }, [loadCredentials])
+
+  const createCredential = useCallback(
+    (input: { name: string; provider: string; secret: string }) =>
+      apiFetch('api/credentials', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(input),
+      }).then(async (response) => {
+        const created = (await response.json()) as { error?: string }
+        if (!response.ok) throw new Error(created.error ?? 'could not save the credential')
+        loadCredentials()
+      }),
+    [loadCredentials],
+  )
+
+  const deleteCredential = useCallback(
+    (credential: CredentialSummary) => {
+      const ok = window.confirm(
+        [
+          `Delete the credential "${credential.name}"?`,
+          '',
+          'Any step using it will fail until it is pointed at another one. The key ' +
+            'cannot be recovered — it is not stored anywhere this can read.',
+        ].join(CONFIRM_NEWLINE),
+      )
+      if (!ok) return
+
+      apiFetch(`api/credentials/${encodeURIComponent(credential.credentialId)}`, {
+        method: 'DELETE',
+      })
+        .then(() => loadCredentials())
+        .catch((error: unknown) => {
+          setPublishError(error instanceof Error ? error.message : String(error))
+        })
+    },
+    [loadCredentials],
   )
 
   const createFlow = useCallback(
@@ -1586,8 +1856,20 @@ function Editor() {
           now={renderedAt}
           onOpen={(id) => setFlowId(id)}
           onCreate={() => setNewFlowOpen(true)}
+          onCredentials={() => setCredentialsOpen(true)}
           onArchive={archiveFlow}
         />
+
+        {credentialsOpen && (
+          <CredentialsDialog
+            credentials={credentials}
+            providers={AI_PROVIDERS}
+            unavailable={credentialsUnavailable}
+            onClose={() => setCredentialsOpen(false)}
+            onCreate={createCredential}
+            onDelete={deleteCredential}
+          />
+        )}
 
         {newFlowOpen && (
           <NewFlowDialog onClose={() => setNewFlowOpen(false)} onCreate={createFlow} />
@@ -1959,6 +2241,7 @@ function Editor() {
           nodeId={selected.id}
           kind={selected.kind}
           data={selected.data}
+          credentials={credentials}
           onClose={() => {
             setSetupOpen(false)
             editorStore.getState().clearFocusedField()
@@ -1999,6 +2282,7 @@ function SetupDialog({
   outputs,
   live,
   connected,
+  credentials,
 }: {
   nodeId: string
   kind: string
@@ -2010,6 +2294,8 @@ function SetupDialog({
   outputs: Record<string, unknown>
   live: boolean
   connected: boolean
+  /** The tenant's saved keys, for the step form's credential picker. */
+  readonly credentials: readonly CredentialSummary[]
 }) {
   const isTrigger = kind === 'trigger'
 
@@ -2089,7 +2375,13 @@ function SetupDialog({
             {/* A trigger is the one step whose most useful fact is not a field:
                 it is the address to send to. */}
             {isTrigger && <TriggerEndpoint webhook={webhook} />}
-            <StepForm key={nodeId} nodeId={nodeId} kind={kind} data={data} />
+            <StepForm
+              key={nodeId}
+              nodeId={nodeId}
+              kind={kind}
+              data={data}
+              credentials={credentials}
+            />
           </div>
 
           {!isTrigger && (
@@ -2427,14 +2719,39 @@ function StepForm({
   nodeId,
   kind,
   data,
+  credentials,
 }: {
   nodeId: string
   kind: string
   data: Record<string, unknown>
+  /**
+   * The tenant's saved keys, for a field whose options are not in the schema.
+   *
+   * Passed in rather than fetched here: this component renders once per step
+   * and the list is the same for all of them, so fetching per form would make
+   * opening a dialog a network round trip for no new information.
+   */
+  readonly credentials: readonly CredentialSummary[]
 }) {
   const schema = SCHEMAS[kind]
   // Only the fields that apply to what this step is set to do.
   const fields = visibleFields(schema, data)
+
+  /*
+    Options for a field the schema cannot enumerate.
+
+    Only the credentials for the provider this step is set to: a groq key
+    offered to an openai step is an invitation to a 401 that looks like a bad
+    key. When the step names no provider yet, the first in the menu is what it
+    will send, so that is what is matched — the same rule `visibleFields` uses.
+  */
+  const dynamicOptions = (field: string): readonly { value: string; label: string }[] | undefined => {
+    if (schema?.optionsFrom?.[field] !== 'credentials') return undefined
+    const chosen = String(data['provider'] ?? '') || (schema.choices?.['provider']?.[0] ?? '')
+    return credentials
+      .filter((credential) => credential.provider === chosen)
+      .map((credential) => ({ value: credential.credentialId, label: credential.name }))
+  }
 
   return (
     <form onSubmit={(event) => event.preventDefault()}>
@@ -2450,6 +2767,7 @@ function StepForm({
           multiline={schema?.multiline?.includes(field) ?? false}
           choices={schema?.choices?.[field]}
           choiceLabels={schema?.choiceLabels?.[field]}
+          options={dynamicOptions(field)}
           hint={schema?.hints?.[field]}
           placeholder={schema?.placeholders?.[field]}
           nodeId={nodeId}
@@ -2477,6 +2795,7 @@ function Field({
   multiline = false,
   choices,
   choiceLabels,
+  options,
   hint,
   placeholder,
   nodeId,
@@ -2492,6 +2811,15 @@ function Field({
   choices?: readonly string[]
   /** What each choice is called on screen, when that differs from its value. */
   choiceLabels?: Readonly<Record<string, string>>
+  /**
+   * Options fetched from the server, for a field the schema cannot enumerate.
+   *
+   * Separate from `choices` because the value and the label genuinely differ
+   * here — a credential is stored by id and recognised by name — and because
+   * an empty list is meaningful rather than a mistake: it means nothing has
+   * been saved yet, which the field says.
+   */
+  options?: readonly { value: string; label: string }[]
   /** A line under the field saying what belongs in it. */
   hint?: string
   placeholder?: string
@@ -2526,7 +2854,37 @@ function Field({
     <label className="field">
       <span>{display ?? label}</span>
 
-      {choices !== undefined ? (
+      {options !== undefined ? (
+        /*
+          A server-provided list.
+
+          Committed on change like any menu. The empty option is not "unset" as
+          a placeholder — it is a real choice meaning "use the server's own
+          key", which is what an AI step does with no credential.
+        */
+        options.length === 0 ? (
+          <p className="muted field-empty">
+            No credentials saved for this provider. Add one under Credentials on the flow list,
+            then reopen this step.
+          </p>
+        ) : (
+          <select
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value)
+              if (event.target.value !== value) onCommit(event.target.value)
+            }}
+            onFocus={claimFocus}
+          >
+            <option value="">— use the server&rsquo;s own key —</option>
+            {options.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        )
+      ) : choices !== undefined ? (
         /*
           A menu commits on change rather than on blur.
 

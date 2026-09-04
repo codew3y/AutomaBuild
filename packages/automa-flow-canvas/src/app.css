@@ -1231,3 +1231,65 @@ button.danger.inline { width: auto; margin-top: 0; }
   margin-top: .1rem;
   max-width: 46ch;
 }
+
+/* ------------------------------------------------------------ credentials -- */
+
+/* Two buttons where there was one; the primary one stays on the right. */
+.overview-actions { display: flex; gap: .5rem; align-items: center; }
+
+.cred-list {
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+}
+
+.cred-list li {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .45rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.cred-name { font-weight: 550; }
+
+/* Pushes the delete button to the far edge, whatever the name's length. */
+.cred-used { margin-left: auto; font-size: .72rem; }
+
+.cred-remove {
+  padding: 0 .35rem;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: var(--radius);
+}
+.cred-remove:hover { color: var(--error); border-color: var(--error); background: var(--error-soft); }
+
+/* The add form, separated from the list it adds to. */
+.cred-add {
+  padding-top: .85rem;
+  border-top: 1px solid var(--line);
+}
+
+/*
+  A field with nothing to choose from.
+
+  Not a disabled menu: an empty menu says "pick one of nothing", which is not
+  the situation. The situation is that a credential has to be saved first, and
+  that is what this says.
+*/
+.field-empty {
+  margin: 0;
+  padding: .4rem .5rem;
+  font-size: .72rem;
+  line-height: 1.4;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  max-width: 46ch;
+}
