@@ -23,6 +23,8 @@ import { verifyGitHub } from './verify/github.ts'
 import { verifySlack } from './verify/slack.ts'
 import { verifyStandardWebhooks } from './verify/standard-webhooks.ts'
 import { verifyTally } from './verify/tally.ts'
+import { verifyHubSpot } from './verify/hubspot.ts'
+import { verifyToken } from './verify/token.ts'
 import {
   assertRetentionCoversTolerance,
   type DeliveryOutcome,
@@ -37,7 +39,18 @@ import {
  * scheme meant finding all five, and missing one produced a scheme that
  * verified correctly and could not be selected.
  */
-export const SCHEMES = ['stripe', 'github', 'slack', 'standard', 'tally'] as const
+export const SCHEMES = [
+  'stripe',
+  'github',
+  'slack',
+  'standard',
+  'tally',
+  'hubspot',
+  // Last, and not by accident: it is the only scheme here that does not
+  // authenticate the body. See verify/token.ts for what it does and does
+  // not give you.
+  'token',
+] as const
 
 export type Scheme = (typeof SCHEMES)[number]
 
@@ -48,6 +61,8 @@ export const SIGNATURE_HEADERS: Record<Scheme, string> = {
   slack: 'X-Slack-Signature',
   standard: 'webhook-signature',
   tally: 'Tally-Signature',
+  hubspot: 'X-HubSpot-Signature-v3',
+  token: 'X-Webhook-Token',
 }
 
 /** True when the value names a scheme this verifies. */
@@ -61,6 +76,8 @@ const VERIFIERS: Record<Scheme, (input: VerifyInput) => VerificationResult> = {
   slack: verifySlack,
   standard: verifyStandardWebhooks,
   tally: verifyTally,
+  hubspot: verifyHubSpot,
+  token: verifyToken,
 }
 
 export interface EndpointConfig {
@@ -76,6 +93,8 @@ export interface GateRequest {
   readonly rawBody: Buffer | string
   readonly headers: Readonly<Record<string, string | string[] | undefined>>
   readonly method?: string
+  /** The absolute URL the request arrived at. Required by the hubspot scheme. */
+  readonly url?: string
   readonly now?: Date
 }
 
@@ -132,6 +151,9 @@ export function createGate(options: GateOptions) {
       secrets: endpoint.secrets,
       toleranceSeconds: tolerance,
       maxBodyBytes: endpoint.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES,
+      // Only the schemes that sign them read these; the rest ignore them.
+      ...(request.method === undefined ? {} : { method: request.method }),
+      ...(request.url === undefined ? {} : { url: request.url }),
       ...(request.now === undefined ? {} : { now: request.now }),
     })
 

@@ -70,6 +70,24 @@ export interface VerifyInput {
   readonly now?: Date
   /** Reject before hashing anything larger than this. */
   readonly maxBodyBytes?: number
+  /**
+   * The request method, for schemes that sign it.
+   *
+   * Most do not: the body carries the intent and the method is always
+   * POST. HubSpot signs it, so a signature captured from one endpoint
+   * cannot be replayed against another verb.
+   */
+  readonly method?: string
+  /**
+   * The absolute URL the request arrived at, for schemes that sign it.
+   *
+   * Scheme, host, path and query, exactly as the sender addressed it —
+   * which behind a proxy is not what the socket saw. Getting this wrong
+   * fails every delivery with a signature mismatch, indistinguishable
+   * from a wrong secret, so `registerWebhookRoute` builds it from the
+   * forwarded headers rather than leaving it to each caller.
+   */
+  readonly url?: string
 }
 
 export const DEFAULT_TOLERANCE_SECONDS = 300

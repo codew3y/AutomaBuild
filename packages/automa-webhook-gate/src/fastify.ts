@@ -134,6 +134,35 @@ export interface WebhookRouteOptions {
  * failed — malformed, wrong secret, stale — hands an attacker a free oracle,
  * so the detail goes to the log and a flat `unauthorized` goes back.
  */
+/**
+ * The URL the sender addressed, which is not always the one the socket saw.
+ *
+ * HubSpot signs the absolute URL, so this has to be the address the delivery
+ * was actually sent to — scheme, host, path and query. Behind a proxy or a
+ * tunnel, `request.protocol` and the `Host` header describe the last hop
+ * rather than the public address, so the forwarded headers win when present.
+ *
+ * Getting this wrong fails every delivery with a signature mismatch, which
+ * looks exactly like a wrong secret. It is built here, once, rather than left
+ * to each caller to assemble and get subtly different.
+ */
+function absoluteUrl(request: FastifyRequest): string {
+  const first = (value: string | string[] | undefined): string | undefined =>
+    Array.isArray(value) ? value[0] : value
+
+  // A comma-separated forwarded chain lists the original client first.
+  const forwardedProto = first(request.headers['x-forwarded-proto'])?.split(',')[0]?.trim()
+  const forwardedHost = first(request.headers['x-forwarded-host'])?.split(',')[0]?.trim()
+
+  const proto = forwardedProto !== undefined && forwardedProto !== '' ? forwardedProto : request.protocol
+  const host =
+    forwardedHost !== undefined && forwardedHost !== ''
+      ? forwardedHost
+      : (first(request.headers.host) ?? 'localhost')
+
+  return `${proto}://${host}${request.url}`
+}
+
 export function registerWebhookRoute(
   app: FastifyInstance,
   options: WebhookRouteOptions,
@@ -156,6 +185,7 @@ export function registerWebhookRoute(
       rawBody: request.rawBody,
       headers: request.headers,
       method: request.method,
+      url: absoluteUrl(request),
     })
 
     if (result.status !== 200) {

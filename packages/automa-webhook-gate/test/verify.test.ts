@@ -16,6 +16,8 @@ import { verifyStripe, parseStripeSignature } from '../src/verify/stripe.ts'
 import { verifyGitHub } from '../src/verify/github.ts'
 import { verifySlack } from '../src/verify/slack.ts'
 import { verifyTally } from '../src/verify/tally.ts'
+import { verifyHubSpot } from '../src/verify/hubspot.ts'
+import { verifyToken } from '../src/verify/token.ts'
 import {
   verifyStandardWebhooks,
   decodeSecret,
@@ -626,5 +628,141 @@ describe('Tally', () => {
     const again = verify({ 'tally-signature': sign() })
     assert.equal(first.ok && first.dedupKey, again.ok && again.dedupKey)
     assert.equal(first.ok && first.timestamp, undefined, 'no timestamp — do not invent one')
+  })
+})
+
+describe('HubSpot v3', () => {
+  const URL = 'https://hooks.example.com/webhooks/650a9fc3'
+  const MS = String(NOW.getTime())
+
+  // method + url + body + timestamp, base64. Three of those four are unlike
+  // every other scheme here, which is the point of testing each one.
+  const sign = (
+    { method = 'POST', url = URL, body = BODY, ms = MS, secret = SECRET } = {},
+  ) => createHmac('sha256', secret).update(`${method}${url}${body}${ms}`).digest('base64')
+
+  const verify = (overrides: Record<string, unknown> = {}) =>
+    verifyHubSpot({
+      rawBody: BODY,
+      method: 'POST',
+      url: URL,
+      secrets: [SECRET],
+      now: NOW,
+      headers: {
+        'x-hubspot-signature-v3': sign(),
+        'x-hubspot-request-timestamp': MS,
+      },
+      ...overrides,
+    } as Parameters<typeof verifyHubSpot>[0])
+
+  it('accepts a genuine delivery', () => {
+    const result = verify()
+    assert.equal(result.ok, true)
+  })
+
+  it('reads the timestamp as milliseconds, not seconds', () => {
+    // The window is five minutes either way, as everywhere else — but stated
+    // a thousand times larger. Treating this as seconds would put every
+    // delivery decades in the future and reject the lot.
+    const stale = String(NOW.getTime() - 6 * 60 * 1000)
+    const result = verify({
+      headers: {
+        'x-hubspot-signature-v3': sign({ ms: stale }),
+        'x-hubspot-request-timestamp': stale,
+      },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.ok === false && result.reason, 'timestamp_outside_tolerance')
+
+    const fresh = String(NOW.getTime() - 4 * 60 * 1000)
+    assert.equal(
+      verify({
+        headers: {
+          'x-hubspot-signature-v3': sign({ ms: fresh }),
+          'x-hubspot-request-timestamp': fresh,
+        },
+      }).ok,
+      true,
+      'four minutes old is inside the window',
+    )
+  })
+
+  it('signs the method and the URL, so neither can be swapped', () => {
+    // The property that makes this scheme stronger than the others: a captured
+    // signature cannot be pointed at a different endpoint or verb.
+    assert.equal(verify({ url: 'https://hooks.example.com/webhooks/someone-else' }).ok, false)
+    assert.equal(verify({ method: 'PUT' }).ok, false)
+  })
+
+  it('says the URL is missing rather than blaming the signature', () => {
+    // The delivery may be perfectly genuine; it is the caller that has not
+    // supplied what verification needs. Reporting a mismatch would send
+    // someone to rotate a secret that was never the problem.
+    const result = verify({ url: undefined })
+    assert.equal(result.ok, false)
+    assert.equal(result.ok === false && result.reason, 'malformed_signature')
+    assert.match(result.ok === false ? (result.detail ?? '') : '', /request URL/)
+  })
+
+  it('refuses an older signature version rather than checking it loosely', () => {
+    const result = verify({ headers: { 'x-hubspot-signature': 'whatever' } })
+    assert.equal(result.ok, false)
+    assert.equal(result.ok === false && result.reason, 'unsupported_algorithm')
+  })
+
+  it('rejects a forged signature', () => {
+    const result = verify({
+      headers: {
+        'x-hubspot-signature-v3': Buffer.from('nope').toString('base64'),
+        'x-hubspot-request-timestamp': MS,
+      },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.ok === false && result.reason, 'signature_mismatch')
+  })
+})
+
+describe('a shared token, for senders that cannot sign', () => {
+  const verify = (headers: Record<string, string>, secrets = [SECRET], body = BODY) =>
+    verifyToken({ rawBody: body, headers, secrets })
+
+  it('accepts the token in either place a sender might offer', () => {
+    assert.equal(verify({ 'x-webhook-token': SECRET }).ok, true)
+    assert.equal(verify({ authorization: `Bearer ${SECRET}` }).ok, true)
+    assert.equal(verify({ authorization: `bearer ${SECRET}` }).ok, true, 'scheme is case-insensitive')
+  })
+
+  it('rejects a wrong token, and an absent one', () => {
+    assert.equal(verify({ 'x-webhook-token': 'not-it' }).ok, false)
+    assert.equal(verify({}).ok, false)
+    assert.equal(verify({ 'x-webhook-token': '' }).ok, false)
+  })
+
+  it('rotates like the signed schemes', () => {
+    const next = 'the_new_token'
+    const result = verify({ 'x-webhook-token': next }, [SECRET, next])
+    assert.equal(result.ok, true)
+    assert.equal(result.ok && result.secretIndex, 1)
+  })
+
+  it('de-duplicates a genuine redelivery on the body', () => {
+    const first = verify({ 'x-webhook-token': SECRET })
+    const again = verify({ 'x-webhook-token': SECRET })
+    assert.equal(first.ok && first.dedupKey, again.ok && again.dedupKey)
+  })
+
+  it('does not authenticate the body, and the key changes when it changes', () => {
+    // Stated as a test because it is the scheme's central limitation. Anyone
+    // holding the token can send any payload, and gets a new dedup key for it.
+    // That is why a signed scheme is preferred wherever the sender offers one.
+    const other = verify({ 'x-webhook-token': SECRET }, [SECRET], '{"anything":"else"}')
+    const original = verify({ 'x-webhook-token': SECRET })
+    assert.equal(other.ok, true)
+    assert.notEqual(other.ok && other.dedupKey, original.ok && original.dedupKey)
+  })
+
+  it('carries no timestamp, and does not invent one', () => {
+    const result = verify({ 'x-webhook-token': SECRET })
+    assert.equal(result.ok && result.timestamp, undefined)
   })
 })
