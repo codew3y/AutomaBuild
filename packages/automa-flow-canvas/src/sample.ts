@@ -17,6 +17,9 @@
 import type { FlowGraph } from './core/graph.ts'
 import type { RunRecord } from './core/run.ts'
 
+/** A real line break, for a placeholder that has to show one. */
+const FIELD_LINE_BREAK = String.fromCharCode(10)
+
 export const STEP_KINDS = ['http', 'ai', 'transform', 'branch', 'email'] as const
 
 export interface StepSchema {
@@ -134,28 +137,53 @@ export const SCHEMAS: Record<string, StepSchema> = {
   },
 
   ai: {
-    // `prompt` first: it is the field this step is about, and the only one
-    // most flows change after the first time.
-    // `apiKey` is last and optional: the server reads the provider's usual
-    // variable, so the common case is to leave it alone.
-    fields: ['prompt', 'model', 'provider', 'system', 'maxTokens', 'temperature', 'apiKey'],
+    // Ordered as the work is done, which is how both Zapier and n8n order it:
+    // what kind of job, what to do, what to give back, then how to behave, then
+    // the knobs almost nobody touches.
+    fields: [
+      'task',
+      'prompt',
+      'outputFields',
+      'system',
+      'model',
+      'provider',
+      'maxTokens',
+      'temperature',
+      'apiKey',
+    ],
     required: ['prompt', 'model'],
     label: 'Ask an AI',
-    multiline: ['prompt', 'system'],
+    multiline: ['prompt', 'outputFields', 'system'],
     choices: {
+      task: ['summarize', 'classify', 'extract', 'write', 'custom'],
       provider: ['groq', 'openai', 'openrouter', 'together', 'cerebras', 'gemini'],
     },
-    labels: { apiKey: 'api key', maxTokens: 'max tokens' },
+    labels: { outputFields: 'output fields', apiKey: 'api key', maxTokens: 'max tokens' },
     placeholders: {
-      prompt: 'Summarise this in one sentence: {{ trigger.body.message }}',
+      prompt: 'Classify this support message: {{ trigger.body.message }}',
+      outputFields: [
+        'sentiment: text — positive, negative or neutral',
+        'urgent: boolean',
+      ].join(FIELD_LINE_BREAK),
       model: 'llama-3.1-8b-instant',
       apiKey: 'usually leave empty',
-      system: 'You are terse. Answer in one sentence.',
+      system: 'left empty, the task above supplies one',
     },
     hints: {
+      task:
+        'Sets how the model is told to behave — a model asked to classify with no ' +
+        'further instruction writes a paragraph explaining itself instead. Pick ' +
+        'custom if your prompt already says everything.',
       prompt:
-        'Written as plain text — references are substituted for you and escaped, ' +
-        'so a quote or a newline in the data cannot break the request.',
+        'Plain text. References are substituted and escaped for you, so a quote or ' +
+        'a newline in the data cannot break the request.',
+      outputFields:
+        'One per line, as name: type — description. Types: text, number, boolean, ' +
+        'list. Each becomes its own value, so a later step can read ' +
+        '{{ steps.ai.output.sentiment }} and a branch can compare it. Add ? after ' +
+        'a name to let the model leave it out. Leave this empty and you get one ' +
+        'combined answer in output.text instead.',
+      system: 'Optional. Overrides the task’s own instruction when you write one.',
       model: 'Whatever the provider calls it. groq: llama-3.1-8b-instant is free and fast.',
       provider: 'Defaults to groq. All of these speak the same protocol.',
       apiKey:
@@ -163,7 +191,6 @@ export const SCHEMAS: Record<string, StepSchema> = {
         'GROQ_API_KEY for groq, OPENAI_API_KEY for openai, and so on. Set this ' +
         'only to point at a different one, as env:MY_OTHER_KEY. Never the key ' +
         'itself: it would be saved into the published flow.',
-      system: 'Optional. Standing instructions, applied before the prompt.',
       maxTokens: 'Optional. Caps the length of the reply.',
       temperature: 'Optional. 0 is repeatable, 1 is loose. Leave empty for the model default.',
     },

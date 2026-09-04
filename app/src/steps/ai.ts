@@ -43,6 +43,13 @@ import { createSafeFetch, SsrfBlockedError } from 'automa-safe-fetch'
 import { StepFailure, type StepHandler } from 'automa-durable-runner'
 
 import { parseSecretRef, resolveSecret, SecretResolutionError } from '../secret-source.ts'
+import {
+  coerceFields,
+  fieldContract,
+  parseOutputFields,
+  unfence,
+  type OutputField,
+} from './ai-fields.ts'
 
 /** Base URLs for the providers worth not having to look up. */
 export const PROVIDERS: Record<string, string> = {
@@ -78,18 +85,58 @@ export const DEFAULT_KEY_ENV: Record<string, string> = {
   gemini: 'GEMINI_API_KEY',
 }
 
+/**
+ * What the step is for, which decides how the model is told to behave.
+ *
+ * Zapier's AI action offers the same four as prompt templates — Summarize,
+ * Write, Classify, Extract — and they are not decoration. A model asked to
+ * classify something and given no further instruction writes a paragraph
+ * explaining its reasoning, which is not a classification. Saying "answer with
+ * the label and nothing else" is the difference, and it is the same sentence
+ * every time, so the step says it rather than the author.
+ *
+ * `custom` states nothing, for a prompt that already says what it wants.
+ * An explicit system message always wins over the preset, because someone who
+ * wrote one meant it.
+ */
+export const TASKS: Record<string, string> = {
+  summarize:
+    'You summarise. Be faithful to the source and add nothing that is not in it. ' +
+    'Prefer the shortest form that keeps the meaning.',
+  classify:
+    'You classify. Choose from the categories given and answer with the choice only. ' +
+    'If none fits, say so plainly rather than inventing one.',
+  extract:
+    'You extract. Report only values present in the source, verbatim where possible. ' +
+    'If a value is absent, say it is absent rather than guessing.',
+  write:
+    'You draft text for a person to send. Match the tone asked for, keep it concise, ' +
+    'and never invent facts, names or figures that were not given to you.',
+  custom: '',
+}
+
 export interface AiStepConfig {
+  readonly task?: string
   readonly provider?: string
   readonly baseUrl?: string
   readonly model?: string
   readonly prompt?: string
+  readonly outputFields?: string
   readonly system?: string
   readonly apiKey?: string
   readonly maxTokens?: string | number
   readonly temperature?: string | number
 }
 
-/** What a later step reads. Flat on purpose. */
+/**
+ * What a later step reads. Flat on purpose.
+ *
+ * Declared output fields appear at the top level alongside these, so
+ * `{{ steps.ai.output.sentiment }}` works. `text` is always present: it is the
+ * whole answer when no fields were declared, and the raw reply when they were,
+ * which is the only thing worth having when a field did not come back as
+ * expected.
+ */
 export interface AiStepOutput {
   readonly text: string
   readonly model: string
@@ -98,6 +145,7 @@ export interface AiStepOutput {
     readonly promptTokens: number | null
     readonly completionTokens: number | null
   }
+  readonly [field: string]: unknown
 }
 
 /** A number from a text field, or undefined when the field is empty. */
@@ -177,8 +225,33 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
       )
     }
 
+    // Declared before the request is built, because a bad declaration should
+    // fail without spending a call.
+    const fields: OutputField[] = parseOutputFields(config.outputFields ?? '')
+
+    /*
+      The system message, assembled from up to three parts.
+
+      The author's own words if they wrote any, otherwise the preset for the
+      task. Then the field contract, when fields were declared — appended
+      rather than merged, so it cannot be lost inside a long instruction and
+      so a prompt written as a plain question still gets structured back.
+    */
+    const task = (config.task ?? 'custom').trim().toLowerCase()
+    if (!(task in TASKS)) {
+      throw new StepFailure(
+        `unknown task ${JSON.stringify(task)}: expected one of ${Object.keys(TASKS).join(', ')}`,
+        { deterministicallyBroken: true },
+      )
+    }
+
+    const authored = (config.system ?? '').trim()
+    const preamble = authored !== '' ? authored : TASKS[task]!
+    const system = [preamble, fields.length > 0 ? fieldContract(fields) : '']
+      .filter((part) => part !== '')
+      .join('\n\n')
+
     const messages: { role: string; content: string }[] = []
-    const system = (config.system ?? '').trim()
     if (system !== '') messages.push({ role: 'system', content: system })
     messages.push({ role: 'user', content: prompt })
 
@@ -187,6 +260,13 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
     const body = JSON.stringify({
       model,
       messages,
+      // `json_object` rather than a strict `json_schema`: the schema form is
+      // guaranteed by constrained decoding but only on a handful of models —
+      // on Groq, not on the small fast one most flows will use. This is
+      // supported everywhere the chat API is, and the contract in the system
+      // message does the describing. The reply is validated either way, so a
+      // model that ignores it fails the step rather than the flow.
+      ...(fields.length > 0 ? { response_format: { type: 'json_object' } } : {}),
       ...(optionalNumber(config.maxTokens, 'maxTokens') === undefined
         ? {}
         : { max_tokens: optionalNumber(config.maxTokens, 'maxTokens') }),
@@ -235,7 +315,22 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
         )
       }
 
-      return { output: toOutput(parsed, model) }
+      const base = toOutput(parsed, model)
+      if (fields.length === 0) return { output: base }
+
+      // Zapier's rule, and the right one: no declared fields means one
+      // combined answer. With fields, each becomes its own output.
+      let structured: unknown
+      try {
+        structured = JSON.parse(unfence(base.text))
+      } catch {
+        throw new StepFailure(
+          `the model was asked for JSON and returned: ${base.text.slice(0, 300)}`,
+          { requestSent: true, responseReceived: true },
+        )
+      }
+
+      return { output: { ...base, ...coerceFields(structured, fields) } }
     } catch (error) {
       if (error instanceof StepFailure) throw error
 
