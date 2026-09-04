@@ -44,7 +44,6 @@ export interface EditorState {
    */
   readonly focusedField: { readonly nodeId: string; readonly field: string } | null
   readonly leftPanelOpen: boolean
-  readonly rightPanelOpen: boolean
   readonly viewport: Viewport
   readonly panelTab: PanelTab
   readonly paletteOpen: boolean
@@ -54,7 +53,6 @@ export interface EditorState {
   focusField(nodeId: string, field: string): void
   clearFocusedField(): void
   toggleLeftPanel(): void
-  toggleRightPanel(): void
   setViewport(viewport: Viewport): void
   setPanelTab(tab: PanelTab): void
   togglePalette(): void
@@ -69,7 +67,6 @@ export const createEditorStore = () =>
     // Closed by default: mapping moved into the setup dialog, so nothing in
     // this panel is needed to build a flow. What remains is validation and the
     // run viewer, both worth reaching deliberately.
-    rightPanelOpen: false,
     viewport: { x: 0, y: 0, zoom: 1 },
     panelTab: 'setup',
     paletteOpen: true,
@@ -86,9 +83,6 @@ export const createEditorStore = () =>
     },
     toggleLeftPanel() {
       set((state) => ({ leftPanelOpen: !state.leftPanelOpen }))
-    },
-    toggleRightPanel() {
-      set((state) => ({ rightPanelOpen: !state.rightPanelOpen }))
     },
     setViewport(viewport) {
       set({ viewport })

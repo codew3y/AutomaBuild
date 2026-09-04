@@ -37,14 +37,20 @@ import '@xyflow/react/dist/style.css'
 import { useStore } from 'zustand'
 import { createGraphStore } from './store/graph-store.ts'
 import { createEditorStore } from './store/editor-store.ts'
-import { ancestors, canConnect, type FlowGraph } from './core/graph.ts'
-import { canPublish, issuesByNode, validate, type ValidationIssue } from './core/validation.ts'
+import {
+  ancestors,
+  canConnect,
+  type FlowEdge,
+  type FlowGraph,
+  type FlowNode,
+} from './core/graph.ts'
+import { canPublish, issuesByNode, validate } from './core/validation.ts'
 import { createAutosave, type SaveState } from './core/patch.ts'
 import { outputTree, referenceFor, resolveTemplate } from './core/resolve.ts'
 import { buildRunView, outputsFromRun, summarise, type RunRecord } from './core/run.ts'
 import { describeRun, relativeTime, sortHistory, type RunListing } from './core/history.ts'
 import { diffGraph } from './core/patch.ts'
-import { apiFetch, readApiKey, writeApiKey, UnauthorizedError } from './core/api.ts'
+import { apiFetch, writeApiKey, UnauthorizedError } from './core/api.ts'
 import {
   applyTheme,
   nextTheme,
@@ -72,6 +78,18 @@ const NODE_HEIGHT = 44
 
 /** The space between a step and the ghost of the next one. */
 const APPEND_GAP = 56
+
+/**
+ * How an edge the run did not take is drawn.
+ *
+ * At module scope so every dimmed edge shares one object. A literal here would
+ * be a new reference on each recompute, which defeats the edge component's
+ * `memo` for a value that never actually changes.
+ */
+const DIMMED_EDGE = { opacity: 0.22, strokeDasharray: '4 4' } as const
+
+/** Joins the parts of a cache signature; not something a value contains. */
+const SEPARATOR = '\u0001'
 
 const graphStore = createGraphStore({ initial: SAMPLE_FLOW })
 const editorStore = createEditorStore()
@@ -540,13 +558,39 @@ function StepLibrary({
   )
 }
 
+/**
+ * A graph reference that changes only when validation would notice.
+ *
+ * Positions are excluded deliberately: nothing `validate` looks at depends on
+ * where a node sits, so a drag must not invalidate its result.
+ */
+function useValidationGraph(
+  nodes: readonly FlowNode[],
+  edges: readonly FlowEdge[],
+): FlowGraph {
+  const held = useRef<{ readonly key: readonly unknown[]; readonly graph: FlowGraph } | null>(null)
+
+  const key: unknown[] = []
+  for (const node of nodes) key.push(node.id, node.kind, node.data)
+  key.push(SEPARATOR)
+  for (const edge of edges) key.push(edge.id, edge.source, edge.target, edge.sourceHandle)
+
+  const previous = held.current
+  const unchanged =
+    previous !== null &&
+    previous.key.length === key.length &&
+    previous.key.every((value, index) => Object.is(value, key[index]))
+
+  if (!unchanged) held.current = { key, graph: { nodes: [...nodes], edges: [...edges] } }
+  return held.current!.graph
+}
+
 function Editor() {
   const nodes = useStore(graphStore, (state) => state.nodes)
   const edges = useStore(graphStore, (state) => state.edges)
   const selectedNodeId = useStore(editorStore, (state) => state.selectedNodeId)
   const mode = useStore(editorStore, (state) => state.mode)
   const leftPanelOpen = useStore(editorStore, (state) => state.leftPanelOpen)
-  const rightPanelOpen = useStore(editorStore, (state) => state.rightPanelOpen)
 
   const [saveState, setSaveState] = useState<SaveState>('saved')
   const [restored, setRestored] = useState(false)
@@ -641,9 +685,27 @@ function Editor() {
 
   const graph = useMemo<FlowGraph>(() => ({ nodes, edges }), [nodes, edges])
 
+  /*
+    The same graph, but only a new object when validation would say something
+    different about it.
+
+    `graph` above changes on every pointer-move of a drag, because the store
+    hands back a new nodes array each tick. Validation does not read positions
+    at all — it reads kinds, configured data and edges — so deriving `issues`
+    from `graph` re-ran an O(N * (N+E)) pass sixty times a second to produce
+    the identical answer, and the result fed `byNode`, which fed every node's
+    props.
+
+    The fingerprint is O(N+E) and compares the pieces validation actually
+    consults. `data` is compared by reference, which is sound because the
+    store replaces a node object on a move but carries its `data` across
+    untouched.
+  */
+  const validationGraph = useValidationGraph(nodes, edges)
+
   // Validation is derived, not stored. Storing it would mean keeping it in
   // sync, and a stale error highlighting the wrong node is worse than none.
-  const issues = useMemo(() => validate(graph, { schemas: SCHEMAS }), [graph])
+  const issues = useMemo(() => validate(validationGraph, { schemas: SCHEMAS }), [validationGraph])
   const byNode = useMemo(() => issuesByNode(issues), [issues])
   const publishable = useMemo(() => canPublish(issues), [issues])
 
@@ -1135,13 +1197,23 @@ function Editor() {
 
   /* ------------------------------------------------ store → React Flow */
 
+  const rfNodeCache = useRef(
+    new Map<string, { signature: string; source: FlowNode; node: Node }>(),
+  )
+
   const rfNodes = useMemo<Node[]>(() => {
     const source = viewing ? run.graph.nodes : nodes
-    return source.map((node) => {
+    const cache = rfNodeCache.current
+    const fresh = new Map<string, { signature: string; source: FlowNode; node: Node }>()
+
+    const built = source.map((node) => {
       // Not named `run`: that shadowed the run being viewed, whose graph the
       // line above reads.
       const stepRun = viewing ? runView.byNode.get(node.id) : undefined
-      return {
+      const nodeIssues = viewing ? [] : (byNode.get(node.id) ?? [])
+      const messages = nodeIssues.map((issue) => issue.message)
+
+      const candidate: Node = {
         id: node.id,
         type: 'step',
         position: node.position,
@@ -1151,18 +1223,52 @@ function Editor() {
         data: {
           ...node.data,
           kind: node.kind,
-          issueCount: viewing ? 0 : (byNode.get(node.id)?.length ?? 0),
+          issueCount: messages.length,
           // The messages themselves, so hovering a red step says what is wrong
           // with it. There is no list anywhere else any more.
-          issues: viewing ? [] : (byNode.get(node.id) ?? []).map((issue) => issue.message),
-          hasError: viewing
-            ? false
-            : (byNode.get(node.id) ?? []).some((issue) => issue.severity === 'error'),
+          issues: messages,
+          hasError: nodeIssues.some((issue) => issue.severity === 'error'),
           outcome: stepRun?.outcome,
           durationMs: stepRun?.durationMs,
         },
       }
+
+      /*
+        Reuse the previous object when nothing about this node changed.
+
+        `StepNode` is memoised and compares props shallowly, so a fresh `data`
+        object defeats it even when every value inside is identical. Without
+        this, dragging one node re-rendered all of them on every pointer
+        frame — the exact cost the store takes care to avoid by keeping
+        untouched node objects reference-stable, given away again here.
+
+        The node object itself is compared by reference (it covers position,
+        kind and data), and everything derived from outside it is folded into
+        a short string.
+      */
+      const signature = [
+        candidate.selected,
+        candidate.deletable,
+        candidate.data.issueCount,
+        candidate.data.hasError,
+        messages.join(SEPARATOR),
+        stepRun?.outcome ?? '',
+        stepRun?.durationMs ?? '',
+      ].join(SEPARATOR)
+
+      const cached = cache.get(node.id)
+      const reusable =
+        cached !== undefined && cached.signature === signature && Object.is(cached.source, node)
+
+      const resolved = reusable ? cached.node : candidate
+      fresh.set(node.id, { signature, source: node, node: resolved })
+      return resolved
     })
+
+    // Replaced wholesale so a deleted node's entry cannot outlive it.
+    cache.clear()
+    for (const [id, entry] of fresh) cache.set(id, entry)
+    return built
   }, [nodes, selectedNodeId, byNode, viewing, run, runView])
 
   const rfEdges = useMemo<Edge[]>(() => {
@@ -1182,7 +1288,7 @@ function Editor() {
         // The untaken branch is dimmed rather than hidden. Hiding it would
         // remove the very thing the viewer is meant to explain: that there was
         // another path and this run did not take it.
-        style: viewing && !taken ? { opacity: 0.22, strokeDasharray: '4 4' } : undefined,
+        style: viewing && !taken ? DIMMED_EDGE : undefined,
       }
     })
   }, [edges, viewing, run, runView])
