@@ -643,6 +643,17 @@ function Editor() {
   const [dropHint, setDropHint] = useState(false)
 
   /**
+   * Which connections are selected.
+   *
+   * Tracked because the graph is controlled: React Flow reports a selection
+   * change and it is this component's job to remember it. Without that, Delete
+   * worked on a step and did nothing at all on a connection, and the only way
+   * to remove one was to find its scissors with the mouse — an asymmetry with
+   * no reason behind it.
+   */
+  const [selectedEdgeIds, setSelectedEdgeIds] = useState<ReadonlySet<string>>(new Set())
+
+  /**
    * The kind currently being dragged out of the library, if any.
    *
    * The hint used to sit on the canvas permanently, which made it a piece of
@@ -1172,12 +1183,19 @@ function Editor() {
           target.tagName === 'TEXTAREA' ||
           target.isContentEditable)
 
-      // Delete and Backspace remove the selected step — but never while a
-      // field has focus, or backspacing a typo would delete the node.
+      // Delete and Backspace remove the selection — but never while a field
+      // has focus, or backspacing a typo would delete the step.
       if (!typing && (event.key === 'Delete' || event.key === 'Backspace')) {
         if (editorStore.getState().selectedNodeId !== null) {
           event.preventDefault()
           deleteSelected()
+        } else if (selectedEdgeIds.size > 0) {
+          // A step wins when both are selected: it is the larger thing, and
+          // removing it takes its connections with it anyway.
+          event.preventDefault()
+          for (const id of selectedEdgeIds) graphStore.getState().removeEdge(id)
+          graphStore.endGesture()
+          setSelectedEdgeIds(new Set())
         }
         return
       }
@@ -1193,7 +1211,7 @@ function Editor() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [deleteSelected])
+  }, [deleteSelected, selectedEdgeIds])
 
   /* ------------------------------------------------ store → React Flow */
 
@@ -1282,6 +1300,7 @@ function Editor() {
         ...(edge.sourceHandle === undefined ? {} : { sourceHandle: edge.sourceHandle }),
         ...(edge.targetHandle === undefined ? {} : { targetHandle: edge.targetHandle }),
         type: 'cuttable',
+        selected: selectedEdgeIds.has(edge.id),
         label: edge.sourceHandle,
         animated: viewing && taken,
         deletable: !viewing,
@@ -1291,7 +1310,7 @@ function Editor() {
         style: viewing && !taken ? DIMMED_EDGE : undefined,
       }
     })
-  }, [edges, viewing, run, runView])
+  }, [edges, viewing, run, runView, selectedEdgeIds])
 
   /* ------------------------------------------------ React Flow → store */
 
@@ -1325,11 +1344,19 @@ function Editor() {
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
       if (viewing) return
+
+      let selection: Set<string> | null = null
       for (const change of changes) {
         if (change.type === 'remove') graphStore.getState().removeEdge(change.id)
+        else if (change.type === 'select') {
+          selection ??= new Set(selectedEdgeIds)
+          if (change.selected) selection.add(change.id)
+          else selection.delete(change.id)
+        }
       }
+      if (selection !== null) setSelectedEdgeIds(selection)
     },
-    [viewing],
+    [viewing, selectedEdgeIds],
   )
 
   const isValidConnection = useCallback<IsValidConnection>(
@@ -1489,7 +1516,7 @@ function Editor() {
     return (
       <div className="editor">
         <header className="toolbar">
-          <strong className="brand">Automabuild</strong>
+          <h1 className="brand">AutomaBuild</h1>
           <div className="spacer" />
           <button
             className="theme-toggle"
@@ -1549,7 +1576,7 @@ function Editor() {
   return (
     <div className="editor">
       <header className="toolbar">
-        <strong className="brand">Automabuild</strong>
+        <h1 className="brand">AutomaBuild</h1>
 
         <div className="modes">
           <button
@@ -1963,6 +1990,8 @@ function SetupDialog({
 }) {
   const isTrigger = kind === 'trigger'
 
+  const panel = useRef<HTMLDivElement | null>(null)
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -1970,6 +1999,24 @@ function SetupDialog({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
+
+  /*
+    Move focus into the dialog, and put it back on the way out.
+
+    This one opens on a double-click, so focus was left on the canvas behind
+    it: a keyboard user's next Tab went into the page under the dialog, and a
+    screen reader was given no sign that a modal had appeared at all. The first
+    field is the useful target, and the dialog itself is the fallback for a
+    step that has nothing to configure.
+  */
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null
+    const first = panel.current?.querySelector<HTMLElement>(
+      'input, textarea, select, button:not(.dismiss)',
+    )
+    ;(first ?? panel.current)?.focus()
+    return () => previous?.focus()
+  }, [])
 
   return (
     <div
@@ -1981,7 +2028,14 @@ function SetupDialog({
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <div className="dialog dialog-wide" role="dialog" aria-modal="true" aria-label={`Configure ${nodeId}`}>
+      <div
+        ref={panel}
+        tabIndex={-1}
+        className="dialog dialog-wide"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Configure ${nodeId}`}
+      >
         <header className="dialog-header">
           <div>
             <strong>{String(data.label ?? nodeId)}</strong>

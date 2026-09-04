@@ -3,10 +3,43 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Automabuild</title>
+
+    <title>AutomaBuild</title>
+    <meta
+      name="description"
+      content="Build a webhook-triggered flow, map fields between its steps, and read the history of what ran."
+    />
+
+    <!--
+      Both values, so the browser chrome matches whichever theme is showing.
+      They are the --bg tokens from app.css; if those change, these should too.
+    -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f5f8" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c0e13" />
+
+    <!--
+      Inline, as a data URI, so there is no second request and no 404 in the
+      network tab of a fresh deploy. `currentColor` is not available here, so
+      the mark carries the accent directly.
+    -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%235b5bd6'/%3E%3Cpath d='M9 11h5.5a3.5 3.5 0 0 1 0 7H9m0 0h6.5a3.5 3.5 0 0 1 0 7H9V11z' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
+    />
+
+    <!-- The theme is chosen before paint in main.tsx; this keeps form controls
+         and scrollbars from flashing the wrong scheme in the meantime. -->
+    <meta name="color-scheme" content="light dark" />
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      <p style="font: 14px system-ui; padding: 2rem; max-width: 40rem">
+        AutomaBuild is a flow editor and needs JavaScript to run. The API it
+        talks to does not — it is a plain HTTP service, and the webhook
+        endpoints keep working whether this page loads or not.
+      </p>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
