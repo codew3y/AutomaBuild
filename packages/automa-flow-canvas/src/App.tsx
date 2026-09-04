@@ -62,7 +62,15 @@ import {
 } from './core/theme.ts'
 import { KIND_ACCENT, nodeTypes } from './components/StepNode.tsx'
 import { edgeTypes } from './components/CuttableEdge.tsx'
-import { EMPTY_FLOW, SAMPLE_FLOW, SAMPLE_OUTPUTS, SAMPLE_RUN, STEP_KINDS, SCHEMAS } from './sample.ts'
+import {
+  AI_TASK_LABELS,
+  EMPTY_FLOW,
+  SAMPLE_FLOW,
+  SAMPLE_OUTPUTS,
+  SAMPLE_RUN,
+  STEP_KINDS,
+  SCHEMAS,
+} from './sample.ts'
 import './app.css'
 
 /**
@@ -404,10 +412,25 @@ function TriggerEndpoint({ webhook }: { readonly webhook: WebhookInfo | null }) 
 /** What each kind is for, in the words someone building a flow would use. */
 const KIND_BLURB: Record<string, string> = {
   http: 'Call an API',
-  ai: 'Summarise, classify, draft',
+  ai: 'Classify, extract, summarise, draft',
   transform: 'Reshape the data',
   branch: 'Take one path or the other',
   email: 'Send a message',
+}
+
+/**
+ * What a step's card says.
+ *
+ * Usually whatever the author called it. The AI step is the exception: it does
+ * one of several jobs and the job is chosen inside it, so a card reading "ai"
+ * says nothing a reader wants. n8n solves this by shipping a node per task;
+ * this shows the task's name until someone renames the step themselves.
+ */
+function displayLabel(kind: string, data: Record<string, unknown>): string {
+  const authored = String(data['label'] ?? '')
+  if (kind !== 'ai') return authored
+  if (authored !== '' && authored !== 'ai') return authored
+  return AI_TASK_LABELS[String(data['task'] ?? 'custom')] ?? 'LLM Chain'
 }
 
 const KIND_GLYPH: Record<string, string> = {
@@ -1243,6 +1266,7 @@ function Editor() {
         draggable: !viewing,
         data: {
           ...node.data,
+          label: displayLabel(node.kind, node.data),
           kind: node.kind,
           issueCount: messages.length,
           // The messages themselves, so hovering a red step says what is wrong
@@ -2036,7 +2060,7 @@ function SetupDialog({
       >
         <header className="dialog-header">
           <div>
-            <strong>{String(data.label ?? nodeId)}</strong>
+            <strong>{displayLabel(kind, data) || nodeId}</strong>
             <span className="muted">
               {' '}
               <code>{nodeId}</code> · {kind}
@@ -2423,6 +2447,7 @@ function StepForm({
           value={String(data[field] ?? '')}
           multiline={schema?.multiline?.includes(field) ?? false}
           choices={schema?.choices?.[field]}
+          choiceLabels={schema?.choiceLabels?.[field]}
           hint={schema?.hints?.[field]}
           placeholder={schema?.placeholders?.[field]}
           nodeId={nodeId}
@@ -2449,6 +2474,7 @@ function Field({
   value,
   multiline = false,
   choices,
+  choiceLabels,
   hint,
   placeholder,
   nodeId,
@@ -2462,6 +2488,8 @@ function Field({
   multiline?: boolean
   /** When present, the field is a menu rather than a text box. */
   choices?: readonly string[]
+  /** What each choice is called on screen, when that differs from its value. */
+  choiceLabels?: Readonly<Record<string, string>>
   /** A line under the field saying what belongs in it. */
   hint?: string
   placeholder?: string
@@ -2520,7 +2548,7 @@ function Field({
           <option value="">—</option>
           {choices.map((choice) => (
             <option key={choice} value={choice}>
-              {choice}
+              {choiceLabels?.[choice] ?? choice}
             </option>
           ))}
         </select>

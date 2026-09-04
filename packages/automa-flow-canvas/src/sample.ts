@@ -17,6 +17,26 @@
 import type { FlowGraph } from './core/graph.ts'
 import type { RunRecord } from './core/run.ts'
 
+/**
+ * What each AI task is called.
+ *
+ * These are n8n's own node names, because that is what someone arriving from
+ * either product will be looking for. n8n ships a separate node per task —
+ * Text Classifier, Information Extractor, Summarization Chain, Basic LLM Chain
+ * — while Zapier has one AI action whose event you choose inside it. This
+ * follows Zapier's shape, since there is one step kind here, and borrows
+ * n8n's vocabulary for the tasks themselves.
+ *
+ * `write` has no n8n equivalent; the name is Zapier's template category.
+ */
+export const AI_TASK_LABELS: Record<string, string> = {
+  summarize: 'Summarization',
+  classify: 'Text Classifier',
+  extract: 'Information Extractor',
+  write: 'Write',
+  custom: 'LLM Chain',
+}
+
 /** A real line break, for a placeholder that has to show one. */
 const FIELD_LINE_BREAK = String.fromCharCode(10)
 
@@ -43,6 +63,15 @@ export interface StepSchema {
    * the request goes out.
    */
   readonly choices?: Readonly<Record<string, readonly string[]>>
+  /**
+   * What each choice is called on screen.
+   *
+   * The stored value is an identifier and has to stay one — a published
+   * flow holds it, and renaming it would break every flow that used it.
+   * What the menu *shows* is a different question, and this is the answer
+   * to it.
+   */
+  readonly choiceLabels?: Readonly<Record<string, Readonly<Record<string, string>>>>
   /**
    * A friendlier name than the config key.
    *
@@ -152,12 +181,14 @@ export const SCHEMAS: Record<string, StepSchema> = {
       'apiKey',
     ],
     required: ['prompt', 'model'],
-    label: 'Ask an AI',
+    // Not a name I made up: see AI_TASK_LABELS.
+    label: 'AI',
     multiline: ['prompt', 'outputFields', 'system'],
     choices: {
       task: ['summarize', 'classify', 'extract', 'write', 'custom'],
       provider: ['groq', 'openai', 'openrouter', 'together', 'cerebras', 'gemini'],
     },
+    choiceLabels: { task: AI_TASK_LABELS },
     labels: { outputFields: 'output fields', apiKey: 'api key', maxTokens: 'max tokens' },
     placeholders: {
       prompt: 'Classify this support message: {{ trigger.body.message }}',
