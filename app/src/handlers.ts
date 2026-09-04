@@ -18,6 +18,7 @@ import { StepFailure, defaultHandlers, type HandlerRegistry, type StepContext, t
 import { canvasHttpHandler } from './steps/http.ts'
 import { transformHandler } from './steps/transform.ts'
 import { branchHandler } from './steps/branch.ts'
+import { aiHandler } from './steps/ai.ts'
 import { emailHandler, smtpFromEnv, type SmtpConfig } from './steps/email.ts'
 
 /** `{{ steps.fetch.output.email }}` — whitespace-tolerant, nothing else. */
@@ -335,6 +336,9 @@ export function mappingHandlers(options: HandlerOptions = {}): HandlerRegistry {
     trigger: triggerHandler,
     transform: transformHandler(),
     branch: branchHandler(),
+    // Resolves its own API key from a reference at run time, so the flow
+    // row never holds the credential.
+    ai: aiHandler(),
     email:
       smtp === null
         ? unconfigured('email', 'SMTP_HOST is not set')

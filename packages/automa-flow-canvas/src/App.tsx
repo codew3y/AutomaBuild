@@ -403,6 +403,7 @@ function TriggerEndpoint({ webhook }: { readonly webhook: WebhookInfo | null }) 
 /** What each kind is for, in the words someone building a flow would use. */
 const KIND_BLURB: Record<string, string> = {
   http: 'Call an API',
+  ai: 'Summarise, classify, draft',
   transform: 'Reshape the data',
   branch: 'Take one path or the other',
   email: 'Send a message',
@@ -410,6 +411,7 @@ const KIND_BLURB: Record<string, string> = {
 
 const KIND_GLYPH: Record<string, string> = {
   http: '↗',
+  ai: '✦',
   transform: 'ƒ',
   branch: '⑂',
   email: '✉',

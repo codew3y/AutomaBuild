@@ -17,7 +17,7 @@
 import type { FlowGraph } from './core/graph.ts'
 import type { RunRecord } from './core/run.ts'
 
-export const STEP_KINDS = ['http', 'transform', 'branch', 'email'] as const
+export const STEP_KINDS = ['http', 'ai', 'transform', 'branch', 'email'] as const
 
 export interface StepSchema {
   readonly fields: readonly string[]
@@ -130,6 +130,38 @@ export const SCHEMAS: Record<string, StepSchema> = {
       condition:
         'Compare with = != > < >= <=, or with the words contains, starts with, ' +
         'ends with, is in, exists (and their "does not" forms). Join with and / or.',
+    },
+  },
+
+  ai: {
+    // `prompt` first: it is the field this step is about, and the only one
+    // most flows change after the first time.
+    fields: ['prompt', 'model', 'provider', 'apiKey', 'system', 'maxTokens', 'temperature'],
+    required: ['prompt', 'model', 'apiKey'],
+    label: 'Ask an AI',
+    multiline: ['prompt', 'system'],
+    choices: {
+      provider: ['groq', 'openai', 'openrouter', 'together', 'cerebras', 'gemini'],
+    },
+    labels: { apiKey: 'api key', maxTokens: 'max tokens' },
+    placeholders: {
+      prompt: 'Summarise this in one sentence: {{ trigger.body.message }}',
+      model: 'llama-3.1-8b-instant',
+      apiKey: 'env:GROQ_API_KEY',
+      system: 'You are terse. Answer in one sentence.',
+    },
+    hints: {
+      prompt:
+        'Written as plain text — references are substituted for you and escaped, ' +
+        'so a quote or a newline in the data cannot break the request.',
+      model: 'Whatever the provider calls it. groq: llama-3.1-8b-instant is free and fast.',
+      provider: 'Defaults to groq. All of these speak the same protocol.',
+      apiKey:
+        'A reference, not the key: env:GROQ_API_KEY reads it from the server ' +
+        'environment, so the published flow never holds your credential.',
+      system: 'Optional. Standing instructions, applied before the prompt.',
+      maxTokens: 'Optional. Caps the length of the reply.',
+      temperature: 'Optional. 0 is repeatable, 1 is loose. Leave empty for the model default.',
     },
   },
 

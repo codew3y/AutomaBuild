@@ -78,6 +78,7 @@ const KIND_TO_EXECUTOR: Record<string, string> = {
   transform: 'transform',
   email: 'email',
   branch: 'branch',
+  ai: 'ai',
 }
 
 /**

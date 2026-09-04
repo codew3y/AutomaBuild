@@ -40,6 +40,7 @@ export interface StepNodeData extends Record<string, unknown> {
 export const KIND_ACCENT: Record<string, string> = {
   trigger: 'var(--kind-trigger)',
   http: 'var(--kind-http)',
+  ai: 'var(--kind-ai)',
   transform: 'var(--kind-transform)',
   branch: 'var(--kind-branch)',
   email: 'var(--kind-email)',
@@ -48,6 +49,7 @@ export const KIND_ACCENT: Record<string, string> = {
 const KIND_STYLE: Record<string, { accent: string; glyph: string }> = {
   trigger: { accent: 'var(--kind-trigger)', glyph: '▶' },
   http: { accent: 'var(--kind-http)', glyph: '↗' },
+  ai: { accent: 'var(--kind-ai)', glyph: '✦' },
   transform: { accent: 'var(--kind-transform)', glyph: 'ƒ' },
   branch: { accent: 'var(--kind-branch)', glyph: '⑂' },
   email: { accent: 'var(--kind-email)', glyph: '✉' },
