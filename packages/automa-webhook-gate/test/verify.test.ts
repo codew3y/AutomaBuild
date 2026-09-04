@@ -15,6 +15,7 @@ import { createHmac } from 'node:crypto'
 import { verifyStripe, parseStripeSignature } from '../src/verify/stripe.ts'
 import { verifyGitHub } from '../src/verify/github.ts'
 import { verifySlack } from '../src/verify/slack.ts'
+import { verifyTally } from '../src/verify/tally.ts'
 import {
   verifyStandardWebhooks,
   decodeSecret,
@@ -567,5 +568,63 @@ describe('why the raw body matters', () => {
       secrets: [SECRET],
     })
     assert.equal(result.ok, true)
+  })
+})
+
+describe('Tally', () => {
+  // base64 of an HMAC over the raw body, in one header, and nothing else: no
+  // version prefix, no list, no timestamp.
+  const sign = (body = BODY, secret = SECRET) =>
+    createHmac('sha256', secret).update(body).digest('base64')
+
+  const verify = (headers: Record<string, string>, body = BODY, secrets = [SECRET]) =>
+    verifyTally({ rawBody: body, headers, secrets })
+
+  it('accepts a genuine delivery', () => {
+    const result = verify({ 'tally-signature': sign() })
+    assert.equal(result.ok, true)
+  })
+
+  it('reads the header case-insensitively, as Tally documents', () => {
+    const result = verify({ 'Tally-Signature': sign() })
+    assert.equal(result.ok, true)
+  })
+
+  it('rejects a forged signature', () => {
+    const result = verify({ 'tally-signature': Buffer.from('nope').toString('base64') })
+    assert.equal(result.ok, false)
+    assert.equal(result.ok === false && result.reason, 'signature_mismatch')
+  })
+
+  it('says the signature is missing rather than accepting an unsigned delivery', () => {
+    // A secret is optional on Tally's side. An endpoint configured for this
+    // scheme is not optional about it — a verifier that lets unsigned requests
+    // through is not verifying anything.
+    assert.equal(verify({}).ok, false)
+    assert.equal(verify({ 'tally-signature': '' }).ok, false)
+  })
+
+  it('verifies against the bytes that arrived, not a re-serialisation', () => {
+    // Tally signs the raw body, so whitespace and key order are part of it.
+    const spaced = '{ "id" : "evt_1" }'
+    assert.equal(verify({ 'tally-signature': sign(spaced) }, spaced).ok, true)
+    assert.equal(verify({ 'tally-signature': sign(spaced) }, '{"id":"evt_1"}').ok, false)
+  })
+
+  it('accepts either secret during a rotation', () => {
+    const next = 'whsec_the_new_one'
+    const result = verify({ 'tally-signature': sign(BODY, next) }, BODY, [SECRET, next])
+    assert.equal(result.ok, true)
+    assert.equal(result.ok && result.secretIndex, 1, 'the second secret is the one that matched')
+  })
+
+  it('keys on the signature, so a captured delivery cannot be replayed', () => {
+    // No timestamp in this scheme means no freshness, exactly as with GitHub:
+    // the dedup key is the only thing standing between one capture and
+    // unlimited re-runs, so it must not be anything a sender can vary.
+    const first = verify({ 'tally-signature': sign() })
+    const again = verify({ 'tally-signature': sign() })
+    assert.equal(first.ok && first.dedupKey, again.ok && again.dedupKey)
+    assert.equal(first.ok && first.timestamp, undefined, 'no timestamp — do not invent one')
   })
 })

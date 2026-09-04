@@ -22,19 +22,45 @@ import { verifyStripe } from './verify/stripe.ts'
 import { verifyGitHub } from './verify/github.ts'
 import { verifySlack } from './verify/slack.ts'
 import { verifyStandardWebhooks } from './verify/standard-webhooks.ts'
+import { verifyTally } from './verify/tally.ts'
 import {
   assertRetentionCoversTolerance,
   type DeliveryOutcome,
   type ReplayStore,
 } from './replay/store.ts'
 
-export type Scheme = 'stripe' | 'github' | 'slack' | 'standard'
+/**
+ * Every scheme, in one place.
+ *
+ * The list was written out separately in five files — this one, the
+ * application's config, two of its routes and the editor — so adding a
+ * scheme meant finding all five, and missing one produced a scheme that
+ * verified correctly and could not be selected.
+ */
+export const SCHEMES = ['stripe', 'github', 'slack', 'standard', 'tally'] as const
+
+export type Scheme = (typeof SCHEMES)[number]
+
+/** The header each scheme presents its signature in. */
+export const SIGNATURE_HEADERS: Record<Scheme, string> = {
+  stripe: 'Stripe-Signature',
+  github: 'X-Hub-Signature-256',
+  slack: 'X-Slack-Signature',
+  standard: 'webhook-signature',
+  tally: 'Tally-Signature',
+}
+
+/** True when the value names a scheme this verifies. */
+export function isScheme(value: string): value is Scheme {
+  return (SCHEMES as readonly string[]).includes(value)
+}
 
 const VERIFIERS: Record<Scheme, (input: VerifyInput) => VerificationResult> = {
   stripe: verifyStripe,
   github: verifyGitHub,
   slack: verifySlack,
   standard: verifyStandardWebhooks,
+  tally: verifyTally,
 }
 
 export interface EndpointConfig {

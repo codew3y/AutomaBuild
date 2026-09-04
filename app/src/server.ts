@@ -35,8 +35,10 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
 
 import {
   PostgresReplayStore,
+  SIGNATURE_HEADERS,
   createGate,
   createPool as createGatePool,
+  isScheme,
   type EndpointConfig,
 } from 'automa-webhook-gate'
 import { registerRawBody, registerWebhookRoute } from 'automa-webhook-gate/fastify'
@@ -327,13 +329,6 @@ function viewerGraph(graph: CanvasGraph): ViewerGraph {
 }
 
 /** Which header each scheme signs with, so the editor can say so. */
-const SIGNATURE_HEADERS: Record<string, string> = {
-  stripe: 'Stripe-Signature',
-  github: 'X-Hub-Signature-256',
-  slack: 'X-Slack-Signature',
-  standard: 'webhook-signature',
-}
-
 function registerApi(
   app: FastifyInstance,
   pool: ReturnType<typeof createRunnerPool>,
@@ -414,7 +409,7 @@ function registerApi(
     if (name === '') return reply.code(400).send({ error: 'a flow needs a name' })
 
     const scheme = body?.scheme ?? seed.scheme
-    if (!['stripe', 'github', 'slack', 'standard'].includes(scheme)) {
+    if (!isScheme(scheme)) {
       return reply.code(400).send({ error: `${scheme} is not a scheme this verifies` })
     }
 
@@ -515,7 +510,7 @@ function registerApi(
       | undefined
 
     const scheme = body?.scheme ?? 'stripe'
-    if (!['stripe', 'github', 'slack', 'standard'].includes(scheme)) {
+    if (!isScheme(scheme)) {
       return reply.code(400).send({ error: `${scheme} is not a scheme this verifies` })
     }
 

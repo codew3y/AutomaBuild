@@ -51,6 +51,9 @@ export {
   type GateRequest,
   type GateResult,
   type Scheme,
+  SCHEMES,
+  SIGNATURE_HEADERS,
+  isScheme,
 } from './gate.ts'
 
 export {

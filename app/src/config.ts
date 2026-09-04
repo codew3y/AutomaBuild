@@ -1,3 +1,5 @@
+import { isScheme, type Scheme } from 'automa-webhook-gate'
+
 import { resolveApiKey } from './auth.ts'
 
 /**
@@ -16,7 +18,7 @@ export interface AppConfig {
   readonly apiKey: string | null
   readonly tenantId: string
   readonly endpointId: string
-  readonly scheme: 'stripe' | 'github' | 'slack' | 'standard'
+  readonly scheme: Scheme
   readonly secrets: readonly string[]
   readonly canvasDir: string
   readonly gateDb: DbEnv
@@ -77,7 +79,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   const scheme = (env.WEBHOOK_SCHEME ?? 'stripe') as AppConfig['scheme']
-  if (!['stripe', 'github', 'slack', 'standard'].includes(scheme)) {
+  if (!isScheme(scheme)) {
     throw new Error(`WEBHOOK_SCHEME is ${scheme}, which is not a scheme this verifies.`)
   }
 
