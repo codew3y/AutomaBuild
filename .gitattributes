@@ -1,0 +1,14 @@
+# Migrations are hashed after they are applied, so their bytes are part of
+# their identity. A checkout that converts line endings changes the hash
+# without changing a line of SQL, and the runner then refuses to start —
+# correctly, since it cannot tell that apart from someone editing history.
+#
+# This happened: moving the four components into this repository re-checked
+# out every file, CRLF on Windows, and the gate's first migration stopped
+# matching its recorded hash.
+*.sql text eol=lf
+
+# Shell scripts are run by bash; a CR at the end of a shebang line is a
+# syntax error that reads as a missing interpreter.
+*.sh text eol=lf
+*.mjs text eol=lf

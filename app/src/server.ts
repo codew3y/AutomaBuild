@@ -31,7 +31,11 @@ import { readFile } from 'node:fs/promises'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify'
+import Fastify, {
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+} from 'fastify'
 
 import {
   PostgresReplayStore,
@@ -61,7 +65,8 @@ import { registerApiAuth, resolveApiKey } from './auth.ts'
 import { compileFlow, type CanvasGraph } from './flow.ts'
 import { FlowStore, type FlowRef } from './flow-store.ts'
 import { EndpointStore, type Endpoint } from './endpoint-store.ts'
-import { FlowCatalog } from './flow-catalog.ts'
+import { FlowCatalog, UUID } from './flow-catalog.ts'
+import { CredentialError, CredentialStore } from './credentials.ts'
 import { resolveSecrets } from './secret-source.ts'
 import { mappingHandlers } from './handlers.ts'
 import { toViewerListing, toViewerRun, type ViewerGraph } from './runs.ts'
@@ -173,6 +178,24 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
     console.log(`current flow version ${current.versionId}`)
   }
 
+  /*
+    The credential store, or nothing.
+
+    Nothing when ENCRYPTION_KEY is unset: a store that cannot encrypt is not a
+    store, and inventing a key here would make every credential written by the
+    last process unreadable by this one. A step referring to a saved credential
+    then fails saying so, which is the only safe answer — the alternative is
+    silently using the server's own key and billing the wrong account.
+  */
+  const credentials =
+    config.encryptionKey === null ? null : new CredentialStore(runnerPool, config.encryptionKey)
+  if (credentials === null) {
+    console.warn(
+      'warning: ENCRYPTION_KEY is not set, so saved credentials are unavailable. ' +
+        'AI steps fall back to the provider variables in this process’s environment.',
+    )
+  }
+
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 })
 
   // Called directly on the instance the routes live on. Registering it as a
@@ -254,7 +277,7 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
     },
   })
 
-  registerApi(app, runnerPool, flows, endpoints, catalog, seedEndpoint)
+  registerApi(app, runnerPool, flows, endpoints, catalog, seedEndpoint, credentials)
   await registerCanvas(app, config)
 
   const worker =
@@ -267,7 +290,7 @@ export async function buildServer(options: ServerOptions = {}): Promise<RunningS
             // non-blocking: a run already in flight keeps resolving the version
             // it started on while new runs get the new one.
             flows: flows.resolver(),
-            handlers: mappingHandlers(),
+            handlers: mappingHandlers({ credentials }),
             workerId: `web-${process.pid}`,
           },
           {
@@ -336,6 +359,7 @@ function registerApi(
   endpoints: EndpointStore,
   catalog: FlowCatalog,
   seed: Endpoint,
+  credentials: CredentialStore | null,
 ): void {
   /**
    * Which endpoint this request is about, and therefore which tenant.
@@ -362,6 +386,78 @@ function registerApi(
     if (requested === undefined || requested === seed.endpointId) return seed
     return endpoints.byId(requested)
   }
+  /*
+    The tenant's saved API keys — the n8n model: stored once, used by every
+    flow.
+
+    Three routes, and deliberately not four: there is no way to read a
+    credential back. Nothing outside the credential module needs the plaintext
+    except a step about to use it, and an endpoint that returned one would turn
+    any authenticated request into every key the tenant owns.
+  */
+  const requireStore = (reply: FastifyReply): CredentialStore | null => {
+    if (credentials === null) {
+      reply.code(501).send({ error: 'no credential store: ENCRYPTION_KEY is not set' })
+      return null
+    }
+    return credentials
+  }
+
+  app.get('/api/credentials', async (request, reply) => {
+    const store = requireStore(reply)
+    if (store === null) return reply
+    const scope = await scopeOf(request)
+    if (scope === null) return reply.code(404).send({ error: 'no such endpoint' })
+    return store.list(scope.tenantId)
+  })
+
+  app.post('/api/credentials', async (request, reply) => {
+    const store = requireStore(reply)
+    if (store === null) return reply
+    const scope = await scopeOf(request)
+    if (scope === null) return reply.code(404).send({ error: 'no such endpoint' })
+
+    const body = request.body as { name?: string; provider?: string; secret?: string } | undefined
+    const name = (body?.name ?? '').trim()
+    const provider = (body?.provider ?? '').trim().toLowerCase()
+    const secret = body?.secret ?? ''
+
+    if (name === '') return reply.code(400).send({ error: 'a credential needs a name' })
+    if (provider === '') return reply.code(400).send({ error: 'a credential needs a provider' })
+    if (secret.trim() === '') return reply.code(400).send({ error: 'a credential needs a key' })
+
+    try {
+      const created = await store.create({ tenantId: scope.tenantId, name, provider, secret })
+      return reply.code(201).send(created)
+    } catch (error) {
+      if (error instanceof CredentialError) {
+        return reply.code(400).send({ error: error.message })
+      }
+      // The unique index refusing a second credential of one provider with the
+      // same name — indistinguishable in a picker, which is its only use.
+      if ((error as { code?: string }).code === '23505') {
+        return reply.code(409).send({
+          error: `there is already a ${provider} credential called ${JSON.stringify(name)}`,
+        })
+      }
+      throw error
+    }
+  })
+
+  app.delete('/api/credentials/:id', async (request, reply) => {
+    const store = requireStore(reply)
+    if (store === null) return reply
+    const scope = await scopeOf(request)
+    if (scope === null) return reply.code(404).send({ error: 'no such endpoint' })
+
+    const { id } = request.params as { id: string }
+    if (!UUID.test(id)) return reply.code(400).send({ error: 'not a credential id' })
+
+    const removed = await store.remove(scope.tenantId, id)
+    if (!removed) return reply.code(404).send({ error: 'no such credential' })
+    return { ok: true }
+  })
+
   app.get('/api/health', async () => ({ ok: true }))
 
   /**

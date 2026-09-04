@@ -20,6 +20,19 @@ export interface AppConfig {
   readonly endpointId: string
   readonly scheme: Scheme
   readonly secrets: readonly string[]
+  /**
+   * Encrypts the tenants' saved credentials at rest.
+   *
+   * Null when unset, and the credential store is then not created at
+   * all — a flow referring to a saved key fails saying so, rather than
+   * falling back to the server's own environment and billing the wrong
+   * account.
+   *
+   * Deliberately not auto-generated. A key invented at startup would
+   * differ per process and make every credential the last one stored
+   * permanently unreadable.
+   */
+  readonly encryptionKey: string | null
   readonly canvasDir: string
   readonly gateDb: DbEnv
   readonly runnerDb: DbEnv
@@ -97,6 +110,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     tenantId: requireUuid('TENANT_ID', env.TENANT_ID ?? '00000000-0000-4000-8000-000000000001'),
     endpointId: requireUuid('ENDPOINT_ID', env.ENDPOINT_ID ?? '00000000-0000-4000-8000-0000000000e1'),
     scheme,
+    encryptionKey: env.ENCRYPTION_KEY ?? null,
     secrets,
     // The canvas is built separately and served from here. Pointing at a
     // directory that is not there is a startup error rather than a 404 per

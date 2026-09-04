@@ -311,6 +311,17 @@ function unconfigured(kind: string, reason: string): StepHandler {
 export interface HandlerOptions {
   /** Omit to read SMTP settings from the environment. */
   readonly smtp?: SmtpConfig | null
+  /**
+   * The tenants' saved API keys.
+   *
+   * Null when no ENCRYPTION_KEY is configured. A step that refers to a
+   * credential then fails saying so, which is the only safe answer: the
+   * alternative is using the server's own key and billing the wrong
+   * account.
+   */
+  readonly credentials?: {
+    secret(tenantId: string, credentialId: string): Promise<string>
+  } | null
 }
 
 /**
@@ -338,7 +349,7 @@ export function mappingHandlers(options: HandlerOptions = {}): HandlerRegistry {
     branch: branchHandler(),
     // Resolves its own API key from a reference at run time, so the flow
     // row never holds the credential.
-    ai: aiHandler(),
+    ai: aiHandler({ credentials: options.credentials ?? null }),
     email:
       smtp === null
         ? unconfigured('email', 'SMTP_HOST is not set')

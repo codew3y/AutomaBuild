@@ -137,6 +137,8 @@ export interface AiStepConfig {
   readonly outputFields?: string
   readonly system?: string
   readonly apiKey?: string
+  /** A saved credential, by id. Preferred over apiKey when both are set. */
+  readonly credential?: string
   readonly maxTokens?: string | number
   readonly temperature?: string | number
 }
@@ -191,6 +193,17 @@ export function resolveBaseUrl(config: AiStepConfig): string {
 export interface AiHandlerOptions {
   readonly safeFetch?: ReturnType<typeof createSafeFetch>
   readonly env?: NodeJS.ProcessEnv
+  /**
+   * The tenant's own saved keys.
+   *
+   * Absent in tests that do not need one, and absent when no encryption
+   * key is configured — in which case a step referring to a credential
+   * says so, rather than falling back to the server's environment and
+   * quietly billing the wrong account.
+   */
+  readonly credentials?: {
+    secret(tenantId: string, credentialId: string): Promise<string>
+  } | null
 }
 
 export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
@@ -211,10 +224,18 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
       throw new StepFailure('the AI step has no model', { deterministicallyBroken: true })
     }
 
-    // A reference, not a key, and usually not stated at all: the provider's
-    // conventional variable name is the default, so a key in the server's
-    // environment is found with nothing configured here.
+    /*
+      Where the key comes from, in order of preference.
+
+      A saved credential first, which is the n8n model and the one that works
+      for more than one tenant: the key is stored once, encrypted, against the
+      tenant, and every flow picks it from a list. Then an explicit reference,
+      for an operator who would rather keep keys in the environment. Then the
+      provider's conventional variable, so a single-tenant install needs no
+      configuration at all.
+    */
     const provider = (config.provider ?? 'groq').trim().toLowerCase()
+    const credentialId = (config.credential ?? '').trim()
     const keyRef =
       (config.apiKey ?? '').trim() !== ''
         ? config.apiKey!.trim()
@@ -222,14 +243,29 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
 
     let apiKey: string
     try {
-      apiKey = resolveSecret(parseSecretRef(keyRef), options.env ?? process.env)
+      if (credentialId !== '') {
+        if (options.credentials === undefined || options.credentials === null) {
+          // Not a fallback to the environment. A step told to use a specific
+          // tenant's key must not quietly use somebody else's.
+          throw new StepFailure(
+            'this step uses a saved credential, but the server has no credential store — set ENCRYPTION_KEY and restart',
+            { deterministicallyBroken: true },
+          )
+        }
+        apiKey = await options.credentials.secret(context.run.tenantId, credentialId)
+      } else {
+        apiKey = resolveSecret(parseSecretRef(keyRef), options.env ?? process.env)
+      }
     } catch (error) {
+      if (error instanceof StepFailure) throw error
       // Deterministic: an unset variable will be unset on every retry, and the
       // message names which one rather than leaving a 401 to be interpreted.
       const asked =
-        (config.apiKey ?? '').trim() === ''
-          ? `no api key was set on the step, so ${keyRef} was tried`
-          : `the step's api key is ${keyRef}`
+        credentialId !== ''
+          ? `the step uses the saved credential ${credentialId}`
+          : (config.apiKey ?? '').trim() === ''
+            ? `no api key was set on the step, so ${keyRef} was tried`
+            : `the step's api key is ${keyRef}`
       throw new StepFailure(
         error instanceof SecretResolutionError
           ? `the AI step could not resolve its api key — ${asked}: ${error.message}`
