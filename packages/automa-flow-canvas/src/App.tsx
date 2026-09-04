@@ -70,6 +70,7 @@ import {
   SAMPLE_RUN,
   STEP_KINDS,
   SCHEMAS,
+  visibleFields,
 } from './sample.ts'
 import './app.css'
 
@@ -2432,7 +2433,8 @@ function StepForm({
   data: Record<string, unknown>
 }) {
   const schema = SCHEMAS[kind]
-  const fields = schema?.fields ?? []
+  // Only the fields that apply to what this step is set to do.
+  const fields = visibleFields(schema, data)
 
   return (
     <form onSubmit={(event) => event.preventDefault()}>

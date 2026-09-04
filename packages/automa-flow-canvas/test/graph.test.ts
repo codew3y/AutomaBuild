@@ -23,6 +23,7 @@ import {
   type FlowNode,
 } from '../src/core/graph.ts'
 import { canPublish, issuesByNode, referencedSteps, validate } from '../src/core/validation.ts'
+import { SCHEMAS, visibleFields } from '../src/sample.ts'
 
 const node = (id: string, kind = 'http', data: Record<string, unknown> = {}): FlowNode => ({
   id,
@@ -380,5 +381,39 @@ describe('where the next step would go', () => {
       edges: [edge('a', 'b'), edge('b', 'a')],
     }
     assert.equal(chainTail(graph), null)
+  })
+})
+
+describe('which fields a step shows', () => {
+  // A Text Classifier needs categories and a Summarization does not. Showing
+  // every field for every task makes most of the form noise whatever you are
+  // doing — n8n avoids it with a node per task, Zapier by swapping the form
+  // when the action changes. One step kind here, so the form decides.
+  const ai = SCHEMAS['ai']
+
+  it('hides the classification fields for the other tasks', () => {
+    const shown = visibleFields(ai, { task: 'summarize' })
+    assert.equal(shown.includes('categories'), false)
+    assert.equal(shown.includes('allowMultiple'), false)
+    assert.equal(shown.includes('prompt'), true, 'the unconditional ones stay')
+  })
+
+  it('shows them for a classification', () => {
+    const shown = visibleFields(ai, { task: 'classify' })
+    assert.equal(shown.includes('categories'), true)
+    assert.equal(shown.includes('noMatch'), true)
+  })
+
+  it('uses the first choice when the field has not been set yet', () => {
+    // A step dropped on the canvas has no task; the menu will send its first
+    // option, so that is the form to show rather than an arbitrary one.
+    const shown = visibleFields(ai, {})
+    const first = ai?.choices?.['task']?.[0]
+    assert.equal(shown.includes('categories'), first === 'classify')
+  })
+
+  it('leaves a schema without conditions alone', () => {
+    const email = SCHEMAS['email']
+    assert.deepEqual(visibleFields(email, {}), email?.fields)
   })
 })

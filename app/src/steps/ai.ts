@@ -44,10 +44,17 @@ import { StepFailure, type StepHandler } from 'automa-durable-runner'
 
 import { parseSecretRef, resolveSecret, SecretResolutionError } from '../secret-source.ts'
 import {
+  CATEGORIES_FIELD,
+  CATEGORY_FIELD,
+  categoryField,
   coerceFields,
   fieldContract,
+  NO_MATCH,
+  parseCategories,
   parseOutputFields,
+  resolveCategory,
   unfence,
+  type NoMatch,
   type OutputField,
 } from './ai-fields.ts'
 
@@ -117,6 +124,12 @@ export const TASKS: Record<string, string> = {
 
 export interface AiStepConfig {
   readonly task?: string
+  /** Classification only: the categories to choose from. */
+  readonly categories?: string
+  /** Classification only: whether more than one category may be true. */
+  readonly allowMultiple?: string | boolean
+  /** Classification only: what to do when the answer matches none of them. */
+  readonly noMatch?: string
   readonly provider?: string
   readonly baseUrl?: string
   readonly model?: string
@@ -245,9 +258,39 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
       )
     }
 
+    /*
+      A classification adds one field of its own.
+
+      Expressed as an ordinary output field so the contract, the coercion and
+      the missing-answer check all apply to it unchanged — and so an author who
+      declares fields of their own gets one answer containing both rather than
+      two schemes competing for the reply.
+    */
+    const categories = task === 'classify' ? parseCategories(config.categories ?? '') : []
+    const multiple = config.allowMultiple === true || config.allowMultiple === 'multiple'
+    const noMatch: NoMatch = config.noMatch === 'fail' ? 'fail' : 'other'
+    if (config.noMatch !== undefined && config.noMatch !== '' && !NO_MATCH.includes(noMatch)) {
+      throw new StepFailure(
+        `unknown noMatch ${JSON.stringify(config.noMatch)}: expected ${NO_MATCH.join(' or ')}`,
+        { deterministicallyBroken: true },
+      )
+    }
+
+    if (task === 'classify' && categories.length === 0) {
+      // Classifying into nothing is not a task. Said here rather than letting
+      // the model invent its own set, which it will, differently each time.
+      throw new StepFailure(
+        'a Text Classifier needs categories: list them one per line, as name — description',
+        { deterministicallyBroken: true },
+      )
+    }
+
+    const asked: OutputField[] =
+      categories.length > 0 ? [categoryField(categories, multiple), ...fields] : fields
+
     const authored = (config.system ?? '').trim()
     const preamble = authored !== '' ? authored : TASKS[task]!
-    const system = [preamble, fields.length > 0 ? fieldContract(fields) : '']
+    const system = [preamble, asked.length > 0 ? fieldContract(asked) : '']
       .filter((part) => part !== '')
       .join('\n\n')
 
@@ -266,7 +309,7 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
       // supported everywhere the chat API is, and the contract in the system
       // message does the describing. The reply is validated either way, so a
       // model that ignores it fails the step rather than the flow.
-      ...(fields.length > 0 ? { response_format: { type: 'json_object' } } : {}),
+      ...(asked.length > 0 ? { response_format: { type: 'json_object' } } : {}),
       ...(optionalNumber(config.maxTokens, 'maxTokens') === undefined
         ? {}
         : { max_tokens: optionalNumber(config.maxTokens, 'maxTokens') }),
@@ -316,7 +359,7 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
       }
 
       const base = toOutput(parsed, model)
-      if (fields.length === 0) return { output: base }
+      if (asked.length === 0) return { output: base }
 
       // Zapier's rule, and the right one: no declared fields means one
       // combined answer. With fields, each becomes its own output.
@@ -330,7 +373,16 @@ export function aiHandler(options: AiHandlerOptions = {}): StepHandler {
         )
       }
 
-      return { output: { ...base, ...coerceFields(structured, fields) } }
+      const values = coerceFields(structured, asked)
+
+      // Hold the model to the categories it was given. A model handed five
+      // will occasionally answer with a sixth it preferred.
+      if (categories.length > 0) {
+        const key = multiple ? CATEGORIES_FIELD : CATEGORY_FIELD
+        values[key] = resolveCategory(values[key], categories, noMatch)
+      }
+
+      return { output: { ...base, ...values } }
     } catch (error) {
       if (error instanceof StepFailure) throw error
 

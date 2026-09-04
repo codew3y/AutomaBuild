@@ -117,6 +117,138 @@ export function parseOutputFields(raw: string): OutputField[] {
 }
 
 /**
+ * A category a classification may answer with.
+ *
+ * n8n's Text Classifier takes exactly this: "Categories have a name and a
+ * description", the description being there "to inform the model about
+ * category meaning, particularly when it's non-obvious". That last part is the
+ * whole reason a description exists — `billing` and `account` are not
+ * self-explanatory to a model that has never seen your support queue.
+ */
+export interface Category {
+  readonly name: string
+  readonly description: string
+}
+
+/**
+ * Read the categories.
+ *
+ * Same `name — description` shape as the output fields, so there is one syntax
+ * to learn rather than two. Names may contain spaces here, because a category
+ * is a value the model answers with rather than a key a reference addresses.
+ */
+export function parseCategories(raw: string): Category[] {
+  const categories: Category[] = []
+  const seen = new Set<string>()
+
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.startsWith('#')) continue
+
+    const dash = trimmed.search(/\s[—-]\s+/)
+    const name = (dash === -1 ? trimmed : trimmed.slice(0, dash)).trim()
+    const description = dash === -1 ? '' : trimmed.slice(dash + 2).trim()
+
+    if (name === '') continue
+    const key = name.toLowerCase()
+    if (seen.has(key)) {
+      throw new StepFailure(`the category ${JSON.stringify(name)} is listed twice`, {
+        deterministicallyBroken: true,
+      })
+    }
+    seen.add(key)
+    categories.push({ name, description })
+  }
+
+  return categories
+}
+
+/** What the step calls its answer, which depends on how many it may give. */
+export const CATEGORY_FIELD = 'category'
+export const CATEGORIES_FIELD = 'categories'
+
+/**
+ * The implicit output field a classification adds.
+ *
+ * Expressed as an ordinary `OutputField` so the whole existing pipeline —
+ * contract, coercion, missing-field check — applies to it unchanged, and so an
+ * author who also declares fields of their own gets both in one answer rather
+ * than two competing schemes.
+ */
+export function categoryField(categories: readonly Category[], multiple: boolean): OutputField {
+  const names = categories.map((category) => category.name).join(' | ')
+  const described = categories
+    .filter((category) => category.description !== '')
+    .map((category) => `${category.name}: ${category.description}`)
+
+  return {
+    name: multiple ? CATEGORIES_FIELD : CATEGORY_FIELD,
+    type: multiple ? 'list' : 'text',
+    description: [
+      multiple ? `any that apply of ${names}` : `exactly one of ${names}`,
+      ...described,
+    ].join('; '),
+    required: true,
+  }
+}
+
+/** How a classification that matched nothing is handled. */
+export const NO_MATCH = ['other', 'fail'] as const
+
+export type NoMatch = (typeof NO_MATCH)[number]
+
+/**
+ * Hold the model to the categories it was given.
+ *
+ * A model handed five categories will occasionally answer with a sixth it
+ * preferred, or with the right answer spelled differently. Matching is
+ * case-insensitive and trimmed, which recovers the second; the first is a real
+ * miss and is handled the way the author asked.
+ *
+ * n8n's equivalent option is **When No Clear Match**, offering "Discard Item"
+ * or an extra "Other" branch. Neither maps here — a step in this engine
+ * succeeds or fails, and there is no per-item discard — so the two honest
+ * choices are to answer `other` and let a branch decide, or to fail loudly.
+ */
+export function resolveCategory(
+  answer: unknown,
+  categories: readonly Category[],
+  noMatch: NoMatch,
+): unknown {
+  const known = new Map(categories.map((category) => [category.name.toLowerCase(), category.name]))
+
+  const settle = (value: string): string | null => known.get(value.trim().toLowerCase()) ?? null
+
+  if (Array.isArray(answer)) {
+    const resolved: string[] = []
+    const unmatched: string[] = []
+    for (const entry of answer) {
+      const match = settle(String(entry))
+      if (match === null) unmatched.push(String(entry))
+      else if (!resolved.includes(match)) resolved.push(match)
+    }
+    if (unmatched.length > 0 && noMatch === 'fail') {
+      throw new StepFailure(
+        `the model answered with ${unmatched.join(', ')}, which ${unmatched.length === 1 ? 'is not one' : 'are not'} of the categories given`,
+        { requestSent: true, responseReceived: true },
+      )
+    }
+    // Everything unmatched collapses to one `other`, rather than several.
+    return unmatched.length > 0 && resolved.length === 0 ? ['other'] : resolved
+  }
+
+  const match = settle(String(answer))
+  if (match !== null) return match
+  if (noMatch === 'fail') {
+    throw new StepFailure(
+      `the model answered ${JSON.stringify(String(answer))}, which is not one of the categories given`,
+      { requestSent: true, responseReceived: true },
+    )
+  }
+  return 'other'
+}
+
+/**
  * The instruction that makes the model answer in the declared shape.
  *
  * Appended to the system message rather than the prompt, so it survives a

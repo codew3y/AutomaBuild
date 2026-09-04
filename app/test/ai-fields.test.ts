@@ -10,9 +10,12 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  categoryField,
   coerceFields,
   fieldContract,
+  parseCategories,
   parseOutputFields,
+  resolveCategory,
   unfence,
 } from '../src/steps/ai-fields.ts'
 
@@ -151,5 +154,105 @@ describe('the code fence models add anyway', () => {
 
   it('leaves anything else alone, so a real failure keeps its evidence', () => {
     assert.equal(unfence('I cannot do that'), 'I cannot do that')
+  })
+})
+
+describe('categories, as a Text Classifier takes them', () => {
+  const raw = [
+    'billing — invoices, refunds, card details',
+    'bug — something is not working',
+    'feature',
+  ].join(LF)
+
+  it('reads a name and the description that explains it', () => {
+    // n8n's own wording: the description is there to tell the model what a
+    // category means "particularly when it is non-obvious".
+    assert.deepEqual(parseCategories(raw), [
+      { name: 'billing', description: 'invoices, refunds, card details' },
+      { name: 'bug', description: 'something is not working' },
+      { name: 'feature', description: '' },
+    ])
+  })
+
+  it('allows spaces in a name, unlike an output field', () => {
+    // A category is a value the model answers with, not a key a reference has
+    // to address, so `not my problem` is a perfectly good category.
+    assert.equal(parseCategories('not my problem — send it elsewhere')[0]!.name, 'not my problem')
+  })
+
+  it('refuses a duplicate however it is cased', () => {
+    assert.throws(() => parseCategories(['Billing', 'billing'].join(LF)), /listed twice/)
+  })
+
+  it('becomes one ordinary output field, so the rest of the pipeline applies', () => {
+    const single = categoryField(parseCategories(raw), false)
+    assert.equal(single.name, 'category')
+    assert.equal(single.type, 'text')
+    assert.match(single.description, /exactly one of billing \| bug \| feature/)
+    assert.match(single.description, /billing: invoices/)
+
+    const many = categoryField(parseCategories(raw), true)
+    assert.equal(many.name, 'categories')
+    assert.equal(many.type, 'list')
+    assert.match(many.description, /any that apply/)
+  })
+})
+
+describe('holding the model to the categories it was given', () => {
+  const categories = parseCategories(['billing', 'bug', 'feature'].join(LF))
+
+  it('accepts an answer however it was cased or spaced', () => {
+    assert.equal(resolveCategory(' Billing ', categories, 'other'), 'billing')
+  })
+
+  it('answers other when the model invents a category', () => {
+    // A model handed five will occasionally prefer a sixth.
+    assert.equal(resolveCategory('sales', categories, 'other'), 'other')
+  })
+
+  it('fails instead, when that is what was asked for', () => {
+    assert.throws(() => resolveCategory('sales', categories, 'fail'), /not one of the categories/)
+  })
+
+  it('keeps the ones that matched when several were allowed', () => {
+    assert.deepEqual(resolveCategory(['bug', 'Feature'], categories, 'other'), ['bug', 'feature'])
+  })
+
+  it('drops an invented one from a list rather than losing the real answers', () => {
+    assert.deepEqual(resolveCategory(['bug', 'sales'], categories, 'other'), ['bug'])
+  })
+
+  it('collapses a list of nothing but inventions to one other', () => {
+    assert.deepEqual(resolveCategory(['sales', 'other stuff'], categories, 'other'), ['other'])
+  })
+
+  it('de-duplicates, since a model asked for many sometimes repeats itself', () => {
+    assert.deepEqual(resolveCategory(['bug', 'bug'], categories, 'other'), ['bug'])
+  })
+
+  it('fails on an invented one in a list when told to fail', () => {
+    // Named in the message, so it is clear which answer was the problem.
+    assert.throws(() => resolveCategory(['bug', 'sales'], categories, 'fail'), /sales/)
+    assert.throws(
+      () => resolveCategory(['sales', 'marketing'], categories, 'fail'),
+      /are not the categories|are not/,
+    )
+  })
+})
+
+describe('a classification and the author\u2019s own fields together', () => {
+  it('produces one answer holding both', () => {
+    // The category is expressed as an ordinary output field precisely so this
+    // works without a second scheme competing for the reply.
+    const categories = parseCategories(['billing', 'bug'].join(LF))
+    const asked = [categoryField(categories, false), ...parseOutputFields('summary: text')]
+
+    const contract = fieldContract(asked)
+    assert.match(contract, /"category"/)
+    assert.match(contract, /"summary"/)
+
+    const values = coerceFields({ category: 'bug', summary: 'it crashes' }, asked)
+    assert.equal(values['category'], 'bug')
+    assert.equal(values['summary'], 'it crashes')
   })
 })

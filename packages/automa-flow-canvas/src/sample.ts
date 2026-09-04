@@ -73,6 +73,23 @@ export interface StepSchema {
    */
   readonly choiceLabels?: Readonly<Record<string, Readonly<Record<string, string>>>>
   /**
+   * Fields that only apply for certain values of another field.
+   *
+   * A Text Classifier needs categories and a Summarization does not, and
+   * showing every field for every task means most of the form is noise
+   * whatever you are doing. Both products hide what does not apply — n8n
+   * by shipping a separate node per task, Zapier by swapping the form when
+   * the action event changes. There is one step kind here, so the form
+   * does it.
+   *
+   * A hidden field keeps whatever it holds. Clearing it would throw away a
+   * list of categories because someone looked at Summarization for a
+   * moment, and a task ignores the fields it does not read anyway.
+   */
+  readonly showWhen?: Readonly<
+    Record<string, { readonly field: string; readonly is: readonly string[] }>
+  >
+  /**
    * A friendlier name than the config key.
    *
    * `replyTo` is what the handler wants and "reply to" is what it is called.
@@ -89,6 +106,33 @@ export interface StepSchema {
   readonly hints?: Readonly<Record<string, string>>
   /** Placeholder text, for a field whose shape is easier shown than described. */
   readonly placeholders?: Readonly<Record<string, string>>
+}
+
+/**
+ * The fields that apply, given what the step is currently set to.
+ *
+ * A field with no `showWhen` always applies. One with a condition applies only
+ * when the field it depends on holds one of the listed values — and when that
+ * field is unset, the schema's own default for it decides, so a step dropped
+ * on the canvas shows the right form before anything is chosen.
+ */
+export function visibleFields(
+  schema: StepSchema | undefined,
+  data: Record<string, unknown>,
+): readonly string[] {
+  const all = schema?.fields ?? []
+  const conditions = schema?.showWhen
+  if (conditions === undefined) return all
+
+  return all.filter((field) => {
+    const rule = conditions[field]
+    if (rule === undefined) return true
+    const current = String(data[rule.field] ?? '')
+    // Unset means the step has not been configured yet. The first choice in
+    // the menu is what it will send, so that is what decides.
+    const effective = current === '' ? (schema?.choices?.[rule.field]?.[0] ?? '') : current
+    return rule.is.includes(effective)
+  })
 }
 
 export const SCHEMAS: Record<string, StepSchema> = {
@@ -172,6 +216,9 @@ export const SCHEMAS: Record<string, StepSchema> = {
     fields: [
       'task',
       'prompt',
+      'categories',
+      'allowMultiple',
+      'noMatch',
       'outputFields',
       'system',
       'model',
@@ -186,15 +233,38 @@ export const SCHEMAS: Record<string, StepSchema> = {
     multiline: ['prompt', 'outputFields', 'system'],
     choices: {
       task: ['summarize', 'classify', 'extract', 'write', 'custom'],
+      allowMultiple: ['single', 'multiple'],
+      noMatch: ['other', 'fail'],
       provider: ['groq', 'openai', 'openrouter', 'together', 'cerebras', 'gemini'],
     },
-    choiceLabels: { task: AI_TASK_LABELS },
-    labels: { outputFields: 'output fields', apiKey: 'api key', maxTokens: 'max tokens' },
+    choiceLabels: {
+      task: AI_TASK_LABELS,
+      allowMultiple: { single: 'one category', multiple: 'any that apply' },
+      noMatch: { other: 'answer other', fail: 'fail the step' },
+    },
+    // The three classification fields mean nothing for the other tasks.
+    showWhen: {
+      categories: { field: 'task', is: ['classify'] },
+      allowMultiple: { field: 'task', is: ['classify'] },
+      noMatch: { field: 'task', is: ['classify'] },
+    },
+    labels: {
+      outputFields: 'output fields',
+      allowMultiple: 'how many categories',
+      noMatch: 'when nothing matches',
+      apiKey: 'api key',
+      maxTokens: 'max tokens',
+    },
     placeholders: {
       prompt: 'Classify this support message: {{ trigger.body.message }}',
       outputFields: [
         'sentiment: text — positive, negative or neutral',
         'urgent: boolean',
+      ].join(FIELD_LINE_BREAK),
+      categories: [
+        'billing — invoices, refunds, card details',
+        'bug — something in the product is not working',
+        'feature — asking for something that does not exist yet',
       ].join(FIELD_LINE_BREAK),
       model: 'llama-3.1-8b-instant',
       apiKey: 'usually leave empty',
@@ -214,6 +284,16 @@ export const SCHEMAS: Record<string, StepSchema> = {
         '{{ steps.ai.output.sentiment }} and a branch can compare it. Add ? after ' +
         'a name to let the model leave it out. Leave this empty and you get one ' +
         'combined answer in output.text instead.',
+      categories:
+        'One per line, as name — description. The description is what tells the model ' +
+        'what a category means, which matters when the name does not say so. The answer ' +
+        'arrives as {{ steps.ai.output.category }}.',
+      allowMultiple:
+        'One category, or any that apply. Choosing many puts a list in ' +
+        'output.categories instead of a single output.category.',
+      noMatch:
+        'A model given five categories will sometimes answer with a sixth. Either that ' +
+        'becomes other, for a branch to handle, or the step fails.',
       system: 'Optional. Overrides the task’s own instruction when you write one.',
       model: 'Whatever the provider calls it. groq: llama-3.1-8b-instant is free and fast.',
       provider: 'Defaults to groq. All of these speak the same protocol.',
