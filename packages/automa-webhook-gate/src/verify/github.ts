@@ -76,8 +76,30 @@ export function verifyGitHub(input: VerifyInput): VerificationResult {
   const secretIndex = matchAnySignature(candidates, [signature])
   if (secretIndex === -1) return { ok: false, reason: 'signature_mismatch' }
 
+  // The dedup key is the signature we computed, not the delivery id.
+  //
+  // This is the whole of GitHub's replay protection, so it matters that the
+  // key be something the sender cannot choose. `X-GitHub-Delivery` is not:
+  // GitHub signs the body and nothing else, so the header sits outside the
+  // signed envelope and any value at all can be put in it. Keying on it meant
+  // that one captured (body, signature) pair could be replayed forever, a
+  // fresh delivery id each time, every replay looking like a first delivery
+  // and starting another run. There is no timestamp in this scheme to bound
+  // it either.
+  //
+  // The computed signature is a function of the secret and the body, so it is
+  // identical across a genuine redelivery — which is what dedup is for — and
+  // cannot be varied by anyone who does not hold the secret. `candidates` is
+  // indexed by `secretIndex` rather than using `signature`, so that during a
+  // rotation the key is the one belonging to the secret that actually
+  // matched.
+  //
+  // The delivery id is still required above. It is what makes the scheme
+  // legible in a log, and its absence is a sign of a sender that is not
+  // GitHub.
+  //
   // No timestamp is returned, deliberately: the scheme does not carry one, and
   // inventing `new Date()` here would let a caller believe it had freshness
   // information it does not have.
-  return { ok: true, dedupKey: deliveryId, secretIndex }
+  return { ok: true, dedupKey: candidates[secretIndex]!, secretIndex }
 }

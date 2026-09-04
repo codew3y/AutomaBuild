@@ -152,15 +152,79 @@ type WordOperator = (typeof WORD_OPERATORS)[number]
 /** Operators taking no right-hand side. */
 const UNARY: readonly string[] = ['exists', 'does not exist']
 
+/**
+ * A copy of the condition with the *contents* of quoted spans blanked out.
+ *
+ * Every search for structure — an operator, a joining word, a list comma —
+ * runs over this rather than the original, so nothing inside a quoted value
+ * can be mistaken for syntax. The quote characters themselves are kept, and
+ * the result is the same length as the input, so an index found here is an
+ * index into the original and the operands are sliced from the real text.
+ *
+ * This is what `"5 = 5" = "5 = 5"` needs to work. Scanning the raw string
+ * finds the `=` inside the first literal, splits there, and compares two
+ * fragments of nonsense — reporting `ok` with a `false` that looks like an
+ * answer. `splitJoined` already avoided this for `and` and `or`; the operator
+ * scan did not, and a wrong branch decision that raises no error is the worst
+ * outcome this file has.
+ *
+ * Blanking to spaces is safe because the whole span goes: no operator text
+ * survives inside the quotes to be found, and nothing new is spelled out
+ * across the boundary.
+ */
+function maskQuoted(source: string): string {
+  // Indexed rather than `for..of`: iterating a string by code point returns
+  // two-character strings for anything astral, and the offsets would stop
+  // lining up with the original exactly when someone puts an emoji in a value.
+  let out = ''
+  let quote: string | null = null
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]!
+    if (quote !== null) {
+      out += char === quote ? char : ' '
+      if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      out += char
+      continue
+    }
+    out += char
+  }
+  return out
+}
+
+/** Split on a separator that falls outside quotes, keeping the original text. */
+function splitUnquoted(source: string, separator: string): string[] {
+  const masked = maskQuoted(source)
+  const parts: string[] = []
+  let start = 0
+  for (let i = 0; i < masked.length; i += 1) {
+    if (masked.startsWith(separator, i)) {
+      parts.push(source.slice(start, i))
+      i += separator.length - 1
+      start = i + 1
+    }
+  }
+  parts.push(source.slice(start))
+  return parts
+}
+
 /** Case-insensitive, because that is what someone asking about text means. */
 function fold(value: string): string {
   return unquote(value).toLowerCase()
 }
 
-/** `GB, IE, FR` — the right side of `is in`. Empty entries are dropped. */
+/**
+ * `GB, IE, FR` — the right side of `is in`. Empty entries are dropped.
+ *
+ * Quote-aware, so `"a, b", c` is two entries and not three. The language
+ * honours quoting everywhere else; splitting on every comma regardless made
+ * an entry containing one impossible to write.
+ */
 function splitList(raw: string): string[] {
-  return raw
-    .split(',')
+  return splitUnquoted(raw, ',')
     .map((entry) => fold(entry))
     .filter((entry) => entry !== '')
 }
@@ -222,7 +286,7 @@ function applyWord(op: WordOperator, leftRaw: string, rightRaw: string): Conditi
  * so the two cancel.
  */
 function findWordOperator(source: string): { op: WordOperator; at: number } | null {
-  const haystack = ' ' + source.toLowerCase() + ' '
+  const haystack = ' ' + maskQuoted(source).toLowerCase() + ' '
   for (const op of WORD_OPERATORS) {
     const at = haystack.indexOf(' ' + op + ' ')
     if (at !== -1) return { op, at }
@@ -242,33 +306,11 @@ function findWordOperator(source: string): { op: WordOperator; at: number } | nu
  * comparison" from "a join with one empty side".
  */
 function splitJoined(source: string, word: 'and' | 'or'): string[] | null {
-  const needle = ' ' + word + ' '
-  const lower = source.toLowerCase()
-  const parts: string[] = []
-
-  let start = 0
-  let quote: string | null = null
-
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i]!
-    if (quote !== null) {
-      if (char === quote) quote = null
-      continue
-    }
-    if (char === '"' || char === "'") {
-      quote = char
-      continue
-    }
-    if (lower.startsWith(needle, i)) {
-      parts.push(source.slice(start, i))
-      i += needle.length - 1
-      start = i + 1
-    }
-  }
-
-  if (parts.length === 0) return null
-  parts.push(source.slice(start))
-  return parts
+  // Lower-cased for the search, sliced from the original so the operands keep
+  // their case. The two strings are the same length, so the offsets agree.
+  const parts = splitUnquoted(source.toLowerCase(), ' ' + word + ' ')
+  if (parts.length === 1) return null
+  return splitUnquoted(source, ' ' + word + ' ')
 }
 
 /** Strip one layer of matching quotes, so `"premium"` compares as `premium`. */
@@ -337,10 +379,14 @@ export function evaluateCondition(condition: string): ConditionResult {
     return applyWord(word.op, left, right)
   }
 
+  const masked = maskQuoted(source)
+
   for (const op of OPERATORS) {
     // `=` must not match the `=` inside `>=`, which is why the operator list
-    // is ordered longest-first and `indexOf` is used rather than a split.
-    const at = source.indexOf(op)
+    // is ordered longest-first and `indexOf` is used rather than a split. The
+    // search runs over the masked copy so an `=` inside a quoted value is not
+    // mistaken for the comparison.
+    const at = masked.indexOf(op)
     if (at === -1) continue
 
     const left = unquote(source.slice(0, at))
@@ -348,6 +394,19 @@ export function evaluateCondition(condition: string): ConditionResult {
 
     if (op === '=') return { ok: true, value: left === right }
     if (op === '!=') return { ok: true, value: left !== right }
+
+    // `Number('')` is 0, not NaN, so the guard below does not catch a blank
+    // operand on its own — and a reference that resolved to an empty string
+    // would quietly compare as zero. `'' >= -1` answering true is not a
+    // comparison anyone asked for.
+    if (left.trim() === '' || right.trim() === '') {
+      return {
+        ok: false,
+        reason:
+          'cannot compare ' + JSON.stringify(left) + ' ' + op + ' ' +
+          JSON.stringify(right) + ': one side is empty',
+      }
+    }
 
     const a = Number(left)
     const b = Number(right)

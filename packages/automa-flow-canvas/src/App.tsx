@@ -915,7 +915,15 @@ function Editor() {
         setPublishError(error instanceof Error ? error.message : String(error))
         setPublishState('error')
       })
-  }, [])
+    // `scope` is why this list is not empty. Every other callback here reads
+    // the stores imperatively through getState(), so it genuinely has no
+    // dependencies; this one closes over a render value, and leaving it out
+    // froze it at its mount value — the empty string, because no flow is open
+    // yet when the editor first renders. Every publish for the whole session
+    // then went to `api/flows/published` with no ?flow=, which the server
+    // reads as the default flow. It published the right graph to the wrong
+    // flow, and said 201.
+  }, [scope])
 
   /**
    * Go back to what is live.
@@ -1014,7 +1022,11 @@ function Editor() {
         })
         .finally(() => setLoadingRun(false))
     },
-    [run.id],
+    // `scope` for the same reason as publish, and it is not inert here either:
+    // switching flows resets `run` to SAMPLE_RUN, whose id is the same
+    // constant every time, so `run.id` alone can be unchanged across a switch
+    // and leave this holding the previous flow's scope.
+    [run.id, scope],
   )
 
   /**

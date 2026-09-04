@@ -292,3 +292,55 @@ describe('joining conditions', () => {
     assert.equal(value('GB is in GB, IE and tier = tier'), true)
   })
 })
+
+describe('quoting beats syntax', () => {
+  const value = (condition: string) => {
+    const result = evaluateCondition(condition)
+    assert.equal(result.ok, true, `${condition} did not evaluate: ${result.ok ? '' : result.reason}`)
+    return result.ok && result.value
+  }
+
+  // Every one of these returned a confident, silent, wrong answer before the
+  // operator scan learned to skip quoted spans. A branch that goes the wrong
+  // way and reports no error is the worst thing this file can do, which is why
+  // they are pinned individually rather than as one case.
+
+  it('does not read an operator word out of a quoted value', () => {
+    assert.equal(value('"yes contains no" = "yes contains no"'), true)
+    assert.equal(value('a = "b contains c"'), false)
+  })
+
+  it('does not read a comparison symbol out of a quoted value', () => {
+    assert.equal(value('"5 = 5" = "5 = 5"'), true)
+    assert.equal(value('"a >= b" = "a >= b"'), true)
+  })
+
+  it('keeps a quoted comma inside one list entry', () => {
+    assert.equal(value('"a, b" is in "a, b", c'), true)
+    assert.equal(value('c is in "a, b", c'), true)
+    assert.equal(value('a is in "a, b", c'), false)
+  })
+
+  it('still finds the real operator either side of a quoted value', () => {
+    assert.equal(value('"fish and chips" contains "and"'), true)
+    assert.equal(value('"fish and chips" ends with "chips"'), true)
+  })
+})
+
+describe('a comparison with nothing on one side', () => {
+  it('refuses rather than reading a blank as zero', () => {
+    // Number('') is 0, not NaN, so the numeric guard did not catch this: an
+    // upstream field that resolved to an empty string compared as zero and the
+    // branch took a path nobody chose.
+    for (const condition of ['   >= -1', '5 > ', ' < 10']) {
+      const result = evaluateCondition(condition)
+      assert.equal(result.ok, false, `${condition} should not evaluate`)
+      assert.match(result.ok ? '' : result.reason, /one side is empty/)
+    }
+  })
+
+  it('still compares real numbers', () => {
+    const result = evaluateCondition('0 >= -1')
+    assert.equal(result.ok && result.value, true, 'a genuine zero is not a blank')
+  })
+})

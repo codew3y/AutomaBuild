@@ -249,7 +249,32 @@ describe('over real HTTP', () => {
     assert.deepEqual(first.json(), { ok: true, duplicate: false })
     assert.equal(second.statusCode, 200)
     assert.deepEqual(second.json(), { ok: true, duplicate: true })
-    assert.deepEqual(accepted, ['http-1'], 'the handler ran twice for one event')
+    assert.equal(accepted.length, 1, 'the handler ran twice for one event')
+  })
+
+  it('does not accept a captured delivery again under a new delivery id', () => {
+    // The key is derived from the secret and the body, so varying the one
+    // header that is not signed no longer mints a fresh key.
+    return (async () => {
+      // Its own body, because the dedup key is now derived from the body and
+      // this suite shares one store — reusing BODY would collide with an
+      // earlier test's delivery and the first post would already be a
+      // duplicate. That collision is the fix working, but it is not what this
+      // test is trying to show.
+      const body = '{"event":"invoice.paid","amount":9999}'
+      const signature = githubSig(body)
+      const first = await post(body, {
+        'x-hub-signature-256': signature,
+        'x-github-delivery': 'capture-1',
+      })
+      const replay = await post(body, {
+        'x-hub-signature-256': signature,
+        'x-github-delivery': 'a-different-id',
+      })
+
+      assert.deepEqual(first.json(), { ok: true, duplicate: false })
+      assert.deepEqual(replay.json(), { ok: true, duplicate: true })
+    })()
   })
 
   it('verifies against the bytes that arrived, not a re-serialisation', async () => {

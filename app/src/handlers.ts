@@ -182,10 +182,46 @@ export interface MappingOptions {
    * preserve a type.
    */
   readonly rawFields?: readonly string[]
+  /**
+   * Fields whose meaning is carried by their line structure.
+   *
+   * `headers` is one: the author writes `Name: value` per line, and the parser
+   * decides what is a header by splitting on newlines. Resolution happens
+   * first, so a `{{ }}` value containing a newline adds a line the author
+   * never wrote — and the parser cannot tell the two apart.
+   *
+   * A flow with `Authorization: Bearer {{ trigger.body.token }}` is enough:
+   * whoever sends the webhook controls that token, and a value of
+   * `abc
+X-Anything: mine` becomes a second header on a request made with
+   * the tenant's credentials. Node's own validation blocks CRLF *within* one
+   * header value, so this is not request smuggling — but the extra header name
+   * is injected before that check is ever reached.
+   *
+   * Detected by counting: resolution may not add line breaks that were not in
+   * the template. Comparing counts needs no knowledge of the field's grammar,
+   * which is what makes it safe to apply to any line-structured field.
+   */
+  readonly lineSafeFields?: readonly string[]
+}
+
+/** Line breaks, counted so that resolution can be shown not to have added any. */
+function countLineBreaks(value: unknown): number {
+  if (typeof value !== 'string') return 0
+  let count = 0
+  // Compared by code rather than by escape: 10 is a line feed, 13 a
+  // carriage return. Only the first can split a header line, but a lone
+  // carriage return has no business arriving through a mapped value either.
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    if (code === 10 || code === 13) count += 1
+  }
+  return count
 }
 
 export function withMapping(handler: StepHandler, options: MappingOptions = {}): StepHandler {
   const rawFields = options.rawFields ?? []
+  const lineSafeFields = options.lineSafeFields ?? []
 
   return async (context: StepContext): Promise<StepResult> => {
     const original = context.node.config ?? {}
@@ -202,6 +238,17 @@ export function withMapping(handler: StepHandler, options: MappingOptions = {}):
 
     if (missing.length > 0) {
       throw new Error(`unresolved reference${missing.length === 1 ? '' : 's'}: ${missing.join(', ')}`)
+    }
+
+    // Deterministic: the same payload injects the same line every time, and
+    // retrying four more times would only repeat the attempt.
+    for (const field of lineSafeFields) {
+      if (countLineBreaks(config[field]) > countLineBreaks(original[field])) {
+        throw new StepFailure(
+          `a mapped value added a line break to \`${field}\`, which would inject a line the flow does not declare`,
+          { deterministicallyBroken: true },
+        )
+      }
     }
 
     // The node is replaced rather than mutated: the engine holds the flow
@@ -298,10 +345,16 @@ export function mappingHandlers(options: HandlerOptions = {}): HandlerRegistry {
   // on MappingOptions.
   const rawFor: Record<string, readonly string[]> = { transform: ['template', 'expression'] }
 
+  // `headers` is line-structured; see MappingOptions.lineSafeFields.
+  const lineSafeFor: Record<string, readonly string[]> = { http: ['headers'] }
+
   return Object.fromEntries(
     Object.entries(base).map(([kind, handler]) => [
       kind,
-      withMapping(handler, { rawFields: rawFor[kind] ?? [] }),
+      withMapping(handler, {
+        rawFields: rawFor[kind] ?? [],
+        lineSafeFields: lineSafeFor[kind] ?? [],
+      }),
     ]),
   )
 }

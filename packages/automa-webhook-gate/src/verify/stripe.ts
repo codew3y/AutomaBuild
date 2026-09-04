@@ -102,7 +102,21 @@ export function verifyStripe(input: VerifyInput): VerificationResult {
     // Stripe has no per-delivery id header, so the dedup key is the signature
     // itself: unique per (secret, timestamp, body), and constant across a
     // redelivery of the same event.
-    dedupKey: parsed.v1[0]!,
+    //
+    // The signature we *computed*, not the first one presented. The header
+    // carries a list — several `v1=` entries exist during a secret rotation —
+    // and `matchAnySignature` succeeds if any entry matches any candidate. So
+    // taking `parsed.v1[0]` took whichever entry happened to be first, which
+    // the sender chooses. Prepending a junk `v1=` to a captured, still-valid
+    // header left verification passing on the real entry further down the list
+    // while the dedup key became the junk value — a key the store has never
+    // seen, so the replay was accepted as new. A different junk value each
+    // time replayed the same event for as long as the tolerance window
+    // allowed.
+    //
+    // `candidates[secretIndex]` is derived from the secret and the signed
+    // payload, so nobody without the secret can influence it.
+    dedupKey: candidates[secretIndex]!,
     timestamp: time.timestamp!,
     secretIndex,
   }

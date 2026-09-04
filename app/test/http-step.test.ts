@@ -10,6 +10,8 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { authorizationHeader, normaliseRequest, parseHeaderLines } from '../src/steps/http.ts'
+import { withMapping } from '../src/handlers.ts'
+import type { StepContext } from 'automa-durable-runner'
 
 describe('headers', () => {
   it('reads one header per line, as they are written everywhere else', () => {
@@ -148,5 +150,72 @@ describe('the request', () => {
       () => normaliseRequest({ url: 'https://x.test', method: 'POST', payload: 'xml', body: 'a' }),
       /expected json, form or raw/,
     )
+  })
+})
+
+describe('a mapped value cannot invent a header', () => {
+  // The headers field is line-structured: the author writes "Name: value" per
+  // line, and resolution happens before the parser splits on newlines. So a
+  // {{ }} value containing a newline adds a line nobody wrote — and whoever
+  // sends the webhook usually controls that value.
+  //
+  // withMapping counts line breaks before and after resolution and fails the
+  // step if resolution added any. These tests drive the real wrapper rather
+  // than normaliseRequest, because the check lives in the wrapper.
+
+  const context = (config: Record<string, unknown>, body: unknown) =>
+    ({
+      run: { input: body },
+      step: {},
+      node: { id: 'call', kind: 'http', config },
+      idempotencyKey: 'k',
+      upstream: {},
+      signal: new AbortController().signal,
+      deadlineMs: 1000,
+    }) as unknown as StepContext
+
+  it('refuses when a resolved value adds a line', async () => {
+    const handler = withMapping(async (ctx) => ({ output: ctx.node.config }), {
+      lineSafeFields: ['headers'],
+    })
+
+    await assert.rejects(
+      () =>
+        handler(
+          context(
+            { headers: 'Authorization: Bearer {{ trigger.body.token }}' },
+            { token: 'abc' + '\n' + 'X-Injected: mine' },
+          ),
+        ),
+      /added a line break/,
+    )
+  })
+
+  it('allows the lines the author wrote', async () => {
+    const handler = withMapping(async (ctx) => ({ output: ctx.node.config }), {
+      lineSafeFields: ['headers'],
+    })
+
+    const result = await handler(
+      context(
+        { headers: 'Accept: application/json' + '\n' + 'X-Key: {{ trigger.body.token }}' },
+        { token: 'abc' },
+      ),
+    )
+    const config = result.output as Record<string, string>
+    assert.equal(config['headers'], 'Accept: application/json' + '\n' + 'X-Key: abc')
+  })
+
+  it('leaves fields that are not line-structured alone', async () => {
+    // An email body is allowed to gain paragraphs from a mapped value.
+    const handler = withMapping(async (ctx) => ({ output: ctx.node.config }), {
+      lineSafeFields: ['headers'],
+    })
+
+    const result = await handler(
+      context({ body: 'Hi {{ trigger.body.note }}' }, { note: 'one' + '\n' + 'two' }),
+    )
+    const config = result.output as Record<string, string>
+    assert.equal(config['body'], 'Hi one' + '\n' + 'two')
   })
 })

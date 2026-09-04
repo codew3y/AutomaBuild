@@ -143,6 +143,40 @@ describe('Stripe', () => {
   })
 })
 
+describe('a Stripe signature list cannot be padded to mint a new dedup key', () => {
+  // `matchAnySignature` succeeds if any presented entry matches any candidate,
+  // which is what makes secret rotation work. Taking the *first* presented
+  // entry as the dedup key therefore handed the sender the choice of key: a
+  // junk `v1=` prepended to a captured, still-valid header verified on the
+  // real entry further down the list while keying on the junk. A different
+  // junk value each time replayed the same event for the whole tolerance
+  // window.
+  const TS_S = Math.floor(NOW.getTime() / 1000)
+  const signed = `${TS_S}.${BODY}`
+  const real = createHmac('sha256', SECRET).update(signed).digest('hex')
+
+  const verify = (header: string) =>
+    verifyStripe({
+      rawBody: BODY,
+      headers: { 'stripe-signature': header },
+      secrets: [SECRET],
+      now: NOW,
+    })
+
+  it('keys on the signature it computed, not the one presented first', () => {
+    const honest = verify(`t=${TS_S},v1=${real}`)
+    const padded = verify(`t=${TS_S},v1=${'0'.repeat(64)},v1=${real}`)
+
+    assert.equal(honest.ok, true)
+    assert.equal(padded.ok, true, 'the real signature is still in the list, so it still verifies')
+    assert.equal(
+      honest.ok && honest.dedupKey,
+      padded.ok && padded.dedupKey,
+      'padding the list must not produce a key the store has never seen',
+    )
+  })
+})
+
 describe('GitHub', () => {
   const sign = (body = BODY, secret = SECRET) => `sha256=${hex(secret, body)}`
   const headers = (overrides: Record<string, string> = {}) => ({
@@ -151,11 +185,35 @@ describe('GitHub', () => {
     ...overrides,
   })
 
-  it('accepts a genuine delivery and uses the delivery id for dedup', () => {
+  it('accepts a genuine delivery and dedupes on the signature, not the delivery id', () => {
     const result = verifyGitHub({ rawBody: BODY, headers: headers(), secrets: [SECRET] })
     assert.equal(result.ok, true)
-    assert.equal(result.dedupKey, 'd-1')
+    // Not 'd-1'. GitHub signs the body and nothing else, so X-GitHub-Delivery
+    // sits outside the signed envelope and anyone can put anything in it.
+    assert.equal(result.dedupKey, createHmac('sha256', SECRET).update(BODY).digest('hex'))
     assert.equal(result.timestamp, undefined, 'GitHub carries no timestamp — do not invent one')
+  })
+
+  it('gives a captured delivery the same key however the delivery id is varied', () => {
+    // The replay this scheme is exposed to. There is no timestamp to expire a
+    // captured (body, signature) pair, so the dedup key is the only thing
+    // standing between one capture and unlimited re-runs. Keying on the
+    // delivery id meant an attacker could mint a fresh key per attempt and
+    // every replay looked like a first delivery.
+    const first = verifyGitHub({ rawBody: BODY, headers: headers(), secrets: [SECRET] })
+    const replay = verifyGitHub({
+      rawBody: BODY,
+      headers: headers({ 'x-github-delivery': 'anything-else' }),
+      secrets: [SECRET],
+    })
+
+    assert.equal(first.ok, true)
+    assert.equal(replay.ok, true)
+    assert.equal(
+      first.ok && first.dedupKey,
+      replay.ok && replay.dedupKey,
+      'a replay with a different delivery id must collide with the original',
+    )
   })
 
   it('rejects a forged signature', () => {
